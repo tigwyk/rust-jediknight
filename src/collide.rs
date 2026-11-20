@@ -2289,12 +2289,50 @@ impl LevelGeometry {
         }
     }
 
+    /// `sithPhysics_ApplyDrag` (`0x4f5d50`): a body slower than `static_drag` stops dead;
+    /// otherwise the velocity loses `min(drag * dt, 1.0)` of itself and components at or under
+    /// `0x52319c` (1e-5) snap to zero.
+    pub fn apply_drag(vel: &mut [f32; 3], drag: f32, static_drag: f32, dt: f32) {
+        if static_drag != 0.0 && dot(*vel, *vel).sqrt() < static_drag {
+            *vel = [0.0; 3];
+            return;
+        }
+        if drag != 0.0 {
+            let scale = -(dt * drag).min(1.0);
+            for v in vel.iter_mut() {
+                *v += *v * scale;
+                if v.abs() <= 1e-5 { *v = 0.0; }
+            }
+        }
+    }
+
+    /// The drag arm of `sithPhysics_UpdateAttachedThingPhysics` (`0x4f7430:180-208`) for a body
+    /// with no thrust of its own (the port's pushed actors, crates and goods; the player's drag
+    /// is `integrate_walk`'s). Friction clamps into `[0.25, 1.0]` (`0x5231c4`, `0x523194`); a
+    /// body `ApplyForce` just pushed (physflag `0x8000`) skips one drag step and clears the
+    /// flag; static drag applies only above friction 0.8 (`0x5231c8`) outside a thrust sector
+    /// (sector flag 8).
+    pub fn apply_attached_drag(
+        state: &mut MoveState, surf_drag: f32, static_drag: f32, thrust_sector: bool, dt: f32,
+    ) {
+        let Some(a) = state.attach else { return };
+        let friction = a.friction.clamp(0.25, 1.0);
+        if state.vel == [0.0; 3] || surf_drag == 0.0 { return; }
+        if state.phys_flags & 0x8000 != 0 {
+            state.phys_flags &= !0x8000;
+            return;
+        }
+        let static_drag = if thrust_sector || friction <= 0.8 { 0.0 } else { static_drag * friction };
+        Self::apply_drag(&mut state.vel, surf_drag * friction, static_drag, dt);
+    }
+
     /// `sithPhysics_UpdateAttachedThingPhysics` (`0x4f7430`), the half a ported attached body
     /// exercises: the attached move's normal rules and the seat hold.
     ///
-    /// Elided with citations (no ported body reaches them):
-    /// - attached drag (`:186-208`, `sithPhysics_ApplyDrag` `0x4f5d50`) is still handled by
-    ///   `integrate_walk`; the normal component is now removed from persistent velocity here;
+    /// Elided or moved, with citations:
+    /// - attached drag (`:180-208`, `sithPhysics_ApplyDrag` `0x4f5d50`) runs in
+    ///   [`Solids::apply_attached_drag`] for non-player bodies and in `integrate_walk` for the
+    ///   player; the normal component is removed from persistent velocity here;
     /// - the look and orientation halves (`:43-93`, physflags 0x100/0x1000/0x8000) and the
     ///   angular integration (`:94-179`): the port's things carry no attached angular state;
     /// - the walk-thrust arm (`:209-246`, physflag 0x2): the port's walk integration is
@@ -5385,6 +5423,27 @@ mod tests {
         let delta = Solids::update_attached_thing_physics(&mut state, 0.02, 0.065, 0.12, 4.0);
         // rise * d - (radius + 0.01) = -0.1 - 0.075 = -0.175; clamp -0.01 along the normal.
         assert!((delta[2] + 0.01).abs() < 1e-6, "the ceiling rest hangs below its seat: {delta:?}");
+    }
+
+    /// `0x4f7430:180-208` with `sithPhysics_ApplyDrag` (`0x4f5d50`): a pushed body (`0x8000`)
+    /// keeps its velocity for one step and clears the flag; after that `_actor`'s `surfdrag=3`
+    /// takes `3 * dt` of the speed each step, and a body under `staticdrag * friction` stops.
+    #[test]
+    fn a_pushed_attached_body_skips_one_drag_step_then_slows_and_stops() {
+        let mut state = floor_state([0.0, 0.0, 0.12], Some(FLAT), 2);
+        state.vel = [1.0, 0.0, 0.0];
+        state.phys_flags |= 0x8000;
+        Solids::apply_attached_drag(&mut state, 3.0, 0.3, false, 0.02);
+        assert_eq!(state.vel, [1.0, 0.0, 0.0], "the push step is not dragged");
+        assert_eq!(state.phys_flags & 0x8000, 0, "the push flag clears");
+        Solids::apply_attached_drag(&mut state, 3.0, 0.3, false, 0.02);
+        assert!((state.vel[0] - 0.94).abs() < 1e-6, "1.0 * (1 - 3 * 0.02) = 0.94, got {}", state.vel[0]);
+        state.vel = [0.2, 0.0, 0.0];
+        Solids::apply_attached_drag(&mut state, 3.0, 0.3, false, 0.02);
+        assert_eq!(state.vel, [0.0; 3], "0.2 is under the 0.3 static drag");
+        state.vel = [0.2, 0.0, 0.0];
+        Solids::apply_attached_drag(&mut state, 3.0, 0.3, true, 0.02);
+        assert!((state.vel[0] - 0.188).abs() < 1e-6, "a thrust sector has no static drag: {}", state.vel[0]);
     }
 
     /// A test body for the floor finder: the player's own shape (kind 10, physflags 0x4a4f)

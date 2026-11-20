@@ -1249,6 +1249,9 @@ pub struct Runtime {
     /// thing's mass (`+0x204`) being non-zero as well as on `physflags & 0x1`, so a massless body with
     /// the gravity bit still floats. `_actor` ships `mass=150`, `_debris` `mass=0.1`.
     pub template_mass: BTreeMap<String, f32>,
+    /// A template's `surfdrag=` and `staticdrag=` (`sithPhysics_ParseArg` `0x4f5ec0` stores them at
+    /// `+0x210`/`+0x214`; an unset one stays zero), read by the attached drag arm.
+    pub template_drag: BTreeMap<String, (f32, f32)>,
     /// World gravity, from the level's own `World Gravity` line: what pulls a physics thing down.
     pub gravity: f32,
     /// Every shot the runtime spawned, so a check can ask "did the trigger work" without sampling
@@ -2419,6 +2422,14 @@ impl Runtime {
                 .collect(),
             template_phys_flags,
             template_mass,
+            template_drag: level
+                .templates
+                .iter()
+                .map(|t| {
+                    let drag = |key| level.template_f32(&t.name, key).filter(|d| *d >= 0.0).unwrap_or(0.0);
+                    (t.name.to_ascii_lowercase(), (drag("surfdrag"), drag("staticdrag")))
+                })
+                .collect(),
             gravity: level.gravity,
             shots_fired: 0,
             encounter_events: Vec::new(),
@@ -7326,6 +7337,7 @@ impl Runtime {
         let start = t.pos;
         let height = self.thing_height(Some(index), radius);
         let gravity = if t.phys_flags & 0x40000 != 0 { self.gravity * 0.5 } else { self.gravity };
+        let (surf_drag, static_drag) = self.template_drag.get(name).copied().unwrap_or((0.0, 0.0));
         let mut state = crate::collide::MoveState {
             pos: start, sector, vel: t.vel, remainder: [0.0; 3], phys_flags: t.phys_flags,
             kind, move_type: 1, collide: self.template_collide.get(name).copied().unwrap_or(1),
@@ -7352,6 +7364,8 @@ impl Runtime {
         if carry != [0.0; 3] {
             self.move_gravity_body_sweep(solids, index, &mut state, carry, radius, height, 0x40);
         }
+        let thrust_sector = thrust.get(sector).is_some_and(|drive| *drive != [0.0; 3]);
+        crate::collide::Solids::apply_attached_drag(&mut state, surf_drag, static_drag, thrust_sector, dt);
         let mut delta = crate::collide::Solids::update_thing_physics(&mut state, dt, radius, height, gravity);
         if let Some(surface) = state.attach.and_then(|a| a.surface) {
             let scroll = self.surface_scroll(surface);
