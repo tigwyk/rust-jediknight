@@ -6403,8 +6403,20 @@ fn main() {
             "AISetFireTarget",
             &[cog::Value::Num(actor as f64), cog::Value::Num(victim as f64)],
         );
-        let before_player_shot = rt.ai_tick(player, 1.0 / 30.0);
-        rt.things[actor].ai_wait = 0.0;
+        // The engine's fire path sets a look frame, so the actor blends onto the victim over
+        // several ticks before its facing passes the instinct's `minDot` gate and the shot leaves.
+        let mut before_player_shot = 0;
+        for _ in 0..120 {
+            rt.things[actor].ai_wait = 0.0;
+            before_player_shot += rt.ai_tick(player, 1.0 / 30.0);
+            if before_player_shot > 0 {
+                break;
+            }
+        }
+        // The blend finishes after the shot; let the body settle onto the target.
+        for _ in 0..120 {
+            rt.ai_tick(player, 1.0 / 30.0);
+        }
         let aimed = rt.things[actor].yaw;
         let to_target = (-(spot[0] - at[0])).atan2(spot[1] - at[1]).to_degrees();
         println!(
