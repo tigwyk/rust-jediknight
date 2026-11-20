@@ -1681,6 +1681,9 @@ pub struct Runtime {
     /// Where an actor last had the player in view (`sithAI`'s last known position). Losing sight
     /// means "walk there", and arriving clears it.
     pub ai_last_seen: BTreeMap<usize, [f32; 3]>,
+    /// When `remember` last wrote `ai_last_seen` — the engine's `ai+0x81` clock, which
+    /// `lookfortarget`'s branch B reads as a memory-decay timeout (`last_seen + fltArg[1] < now`).
+    pub ai_last_seen_at: BTreeMap<usize, f32>,
     /// Actors that have **registered** the player: `sithAI_CanDetectSightThing` (`0x4ec140`) is a
     /// probability roll and the engine re-rolls it while refreshing a target; the port rolls it on
     /// acquisition and then keeps the deterministic sight test (ledger).
@@ -1698,31 +1701,32 @@ pub struct Runtime {
     /// 50 % chance at 2 units takes seconds to latch there. Rolling every frame latched it in one or
     /// two frames and made every gunner see the player the instant the level loaded.
     pub ai_detect_at: std::collections::BTreeMap<usize, f32>,
-    /// When each actor may run its `LookForTarget` scan next. The instinct's first shipped argument
-    /// is the interval (500 ms in every class), and a scan that finds a target hands it to the normal
-    /// chase/aim logic rather than snapping the body round.
-    pub ai_scan: BTreeMap<usize, f32>,
+    /// The scheduler's per-instinct instance state (`ai + 0x10`, stride `0x18`): each instinct's
+    /// own `next` clock, in class-file order. `sithAI_InstinctUpdate` (`0x4e9e90`) arms a due
+    /// instinct at `now + 1000 ms` **before** calling its handler, and a handler may re-arm itself
+    /// (`lookfortarget` at its class interval, `talk` at its own first number). A clock of 0.0 is
+    /// due immediately. This retires the port's per-instinct clock maps (`ai_talk`, `ai_sense`,
+    /// `ai_scan`, `ai_opendoors`, the `roam`/`randomturn`/`circlestrafe` due halves).
+    pub ai_inst: BTreeMap<usize, Vec<f32>>,
+    /// The slot's whole-AI pass deadline (`ai + 0x190`): the earliest armed clock of the instincts
+    /// the mode word accepts, at most `now + 5000`. `sithAI_Process` (`0x4e9e20`) skips the actor
+    /// entirely while it is in the future.
+    pub ai_next_due: BTreeMap<usize, f32>,
+    /// `DAT_008ee66c & 1`: the engine's global AI kill-switch, checked by `sithAI_EmitEvent`
+    /// (`0x4e9f80`) before any dispatch. Nothing in the executable's reachable paths sets it in
+    /// single player, so the port carries the gate and never raises it.
+    pub ai_disabled_global: bool,
     /// The one roll `listen` makes per heard sound: which event an actor has answered, and whether
     /// the class's reaction chance passed. `sithAI_EmitEvent` invokes the handler once per event, so
     /// a failed roll must not be retried while that same sound is still in the sector's ring.
     pub ai_listen: BTreeMap<usize, (f32, [f32; 3], bool)>,
-    /// When each actor may run its `Talk` instinct next. The handler sets its own next run from the
-    /// instinct's first number (`talk 10000.0, 0.10` in most shipped classes), so it keeps no global
-    /// interval.
-    pub ai_talk: BTreeMap<usize, f32>,
+    // (talk's clock lives in `ai_inst`: the handler re-arms at its own first number.)
     /// When a **damaged** turret's `turretfire` handler kills it. `FUN_0050a0f0` arms this slot to
     /// `now + arg7` (the shipped `10000` = 10 s) the first time it runs below `arg5` of full health,
     /// and once the deadline passes it calls `sithActor_KillActor` on its own body.
     pub ai_turret_down: BTreeMap<usize, f32>,
-    /// When each actor's `lobfire` may re-arm the puppet's armed mode. Its handler (`0x509cd0`) only
-    /// has the event-`0x100` branch in its mask, and that branch sets
-    /// `sithPuppet_SetArmedMode(thing, (ai flags & 0x200) != 0)` and re-arms in 1000 ms.
-    pub ai_lobfire: BTreeMap<usize, f32>,
-    /// When each actor's `opendoors` handler may run again. `FUN_0050abc0` calls
-    /// `sithPlayerActions_Activate` only while the AI flag word's bit `0x1` (moved) is set, and
-    /// re-arms itself for `now + 1000 ms`; without the re-arm an actor standing in a doorway
-    /// messaged the linked thing `activated` on every tick.
-    pub ai_opendoors: BTreeMap<usize, f32>,
+    // (lobfire's clock lives in `ai_inst`; its armed-mode write runs from the 0x100 event branch.)
+    // (opendoors' clock lives in `ai_inst`: the handler returns and the scheduler's now+1000 arm holds.)
     /// When each actor may run its `forcepowers` handler next (`0x40ff40`). The handler starts by
     /// setting its own next run to `now + fltArg[0]` (the class line's first number), so the
     /// interval is per class and not global.
@@ -1737,9 +1741,8 @@ pub struct Runtime {
     pub ai_saber_cool: BTreeMap<usize, f32>,
     /// When each actor may fire `specialattack`'s contact event again (event 4).
     pub ai_special: BTreeMap<usize, f32>,
-    /// When each not-yet-alerted actor may check for danger again (`sensedanger` retries once a second
-    /// while the player is out of sight).
-    pub ai_sense: BTreeMap<usize, f32>,
+    // (sensedanger's clock lives in `ai_inst`: the scheduler arms now+1000 and the alert's 0x800
+    // write stops the next pass through the registry's reject word.)
     /// When each actor may dodge again. `dodge`'s damage path (`0x50b360` event 1) sets its own
     /// cooldown to `now + 1000` ms (`ai + 0xa3`), and the shot-passing path has none of its own.
     pub ai_dodge: BTreeMap<usize, f32>,
@@ -1769,22 +1772,23 @@ pub struct Runtime {
     /// (`0x509890`). The handler picks it at random the first time and flips it when the step is
     /// blocked; the port persists it the same way so the orbit does not jitter every frame.
     pub ai_strafe: BTreeMap<usize, f32>,
-    /// The ring point each actor is walking to, and when `circlestrafe`'s own interval lets it replan
-    /// (the instinct's first number is milliseconds, the same slot `talk` reads its interval from).
-    pub ai_strafe_goal: BTreeMap<usize, (f32, [f32; 3])>,
-    /// When each actor started its current `hitandrun` engagement — its first shot after it came back.
-    /// The handler (`0x50bb90`) watches the engine's just-fired flag and breaks off after the
-    /// instinct's first argument (1000–10000 ms shipped) for its second (1500–3000 ms); the port
-    /// records the first firing and arms the same withdraw mode `retreat` uses.
+    /// The ring point each actor is walking to (`circlestrafe`, `0x509890`). When it may replan is
+    /// the instinct's own scheduler slot (`ai_inst`): the first number is milliseconds, the same
+    /// slot `talk` reads its interval from.
+    pub ai_strafe_goal: BTreeMap<usize, [f32; 3]>,
+    /// `hitandrun` (`0x50bb90`) accumulator, in **milliseconds of firing time**: the handler runs on
+    /// its scheduler pass (every 1000 ms while the mode word has `0xc00`), adds 1000 per firing
+    /// pass, resets to zero on a pass that did not fire, and breaks off when the first argument is
+    /// smaller than the accumulator.
     pub ai_hitrun: BTreeMap<usize, f32>,
-    /// Each idle actor's next `randomturn` due time and the yaw it chose, for the `randomturn`
-    /// handler (`0x50b700`): every class interval (1000–2000 ms shipped) the actor picks a random
-    /// direction and turns to look at a point its own argument's distance away (`SetLookFrame`).
-    pub ai_randomturn: BTreeMap<usize, (f32, f32)>,
-    /// Each actor's current `roam` point and when it may pick a new one. The handler (`0x50b830`)
-    /// wanders around the **home anchor** (`ai + 0x93`): a random direction, a random distance inside
-    /// the instinct's first argument, every class interval, then `SetLookFrame` + `SetMovePos` there.
-    pub ai_roam: BTreeMap<usize, (f32, [f32; 3])>,
+    /// Each idle actor's chosen `randomturn` yaw (`0x50b700`): every class interval (1000–2000 ms
+    /// shipped, on the instinct's scheduler slot) the actor picks a random direction. The port turns
+    /// to it at the body's own rate.
+    pub ai_randomturn: BTreeMap<usize, f32>,
+    /// Each actor's current `roam` point (`0x50b830`): a random direction and distance inside the
+    /// instinct's first argument around the home anchor, re-picked on the instinct's scheduler slot.
+    /// The handler only runs while the mode word lacks the searching bit `0x2`.
+    pub ai_roam: BTreeMap<usize, [f32; 3]>,
     /// `sithAIAwareness`: a position other actors of the same side were told about, and when. A
     /// shot is the event; the engine keeps per-sector records that propagate through adjoins and
     /// fade. This build has neither the per-adjoin attenuation nor the recovered reader, so an
@@ -2653,22 +2657,21 @@ impl Runtime {
             ai_look: BTreeMap::new(),
             ai_route: BTreeMap::new(),
             ai_last_seen: BTreeMap::new(),
+            ai_last_seen_at: BTreeMap::new(),
             ai_detected: std::collections::BTreeSet::new(),
             backpack: BTreeMap::new(),
             ai_cleared: std::collections::BTreeSet::new(),
             ai_detect_at: std::collections::BTreeMap::new(),
-            ai_scan: BTreeMap::new(),
+            ai_inst: BTreeMap::new(),
+            ai_next_due: BTreeMap::new(),
+            ai_disabled_global: false,
             ai_listen: BTreeMap::new(),
-            ai_talk: BTreeMap::new(),
             ai_turret_down: BTreeMap::new(),
-            ai_lobfire: BTreeMap::new(),
-            ai_opendoors: BTreeMap::new(),
             ai_force: BTreeMap::new(),
             ai_force_cool: BTreeMap::new(),
             ai_saber: BTreeMap::new(),
             ai_saber_cool: BTreeMap::new(),
             ai_special: BTreeMap::new(),
-            ai_sense: BTreeMap::new(),
             ai_dodge: BTreeMap::new(),
             ai_jump: BTreeMap::new(),
             ai_home: BTreeMap::new(),
@@ -4339,23 +4342,42 @@ impl Runtime {
         true
     }
 
-    /// The event mask a registered instinct enables (the registry's fifth argument): only the two
-    /// instincts this build gives event handlers to are listed — `dodge` `0x1003` (damage, event 2,
-    /// the shot) and `sensedanger` `0x7` (damage, event 2, event 4). Everything else is
-    /// scheduler-only, which is why the mask table does not need the other 23 rows.
-    fn instinct_event_mask(name: &str) -> u32 {
+    /// `sithAICmd_Startup` (`0x5091b0`) registers every sithAI instinct with three words —
+    /// `sithAI_RegisterInstinct(name, handler, accept, reject, mask)` (`0x4ea0a0`) — which the
+    /// class loader copies into each instinct entry (`accept` at `+0x2c`, `reject` at `+0x30`, the
+    /// event mask at `+0x34`). The scheduler gates a run on `(accept & mode) != 0 &&
+    /// (reject & mode) == 0`; the event dispatch wakes every instinct whose `mask` carries the
+    /// event bit, in class-file order. An accept of 0 (`dodge`, `jump`, `listen`, `returnhome`)
+    /// means the engine's scheduler **never** runs the handler: it is event-only. `specialattack`
+    /// is a jk-side command, not in the sithAI registry; its contact mask is the port's own
+    /// measured word (the `aistatus` row reads `4`).
+    fn instinct_registry(name: &str) -> (u32, u32, u32) {
         match name.to_ascii_lowercase().as_str() {
-            "dodge" => 0x1003,
-            "sensedanger" => 0x7,
-            // The registry word the `aistatus` dump reads (`jump` row: `mask 0x604`). Only `0x400` is
-            // ever emitted — the engine's steering helper (`sithAI_idk_msgarrived_target`) raises it when
-            // the way ahead of a moving actor is not walkable — so the handler's `4`/`0x200` arms are dead
-            // content, like `dodge`'s event 2.
-            "jump" => 0x604,
-            // `specialattack`'s registry word is `4`: the handler's damage branch runs on the
-            // thing-collision event and only against the player thing.
-            "specialattack" => 4,
-            _ => 0,
+            "listen" => (0, 0, 0x7),
+            "lookfortarget" => (0x204, 0, 0),
+            "primaryfire" => (2, 0, 0x100),
+            "follow" => (2, 0x800, 0xe00),
+            "turretfire" => (2, 0x800, 0x100),
+            "opendoors" => (2, 0, 0),
+            "jump" => (0, 0, 0x604),
+            "randomturn" => (4, 0, 0),
+            "roam" => (4, 0, 0),
+            "flee" => (0x800, 0, 0xf05),
+            "sensedanger" => (4, 0x800, 0x7),
+            "hitandrun" => (0xc00, 0, 0),
+            "retreat" => (2, 0x800, 0),
+            "circlestrafe" => (2, 0x800, 0),
+            "blindfire" => (2, 0xc00, 0),
+            "returnhome" => (0, 0, 0x900),
+            "lobfire" => (2, 0, 0x100),
+            "talk" => (0xffff, 0, 0),
+            "crouch" => (2, 0, 0x100),
+            "withdraw" => (0x800, 0, 0xf05),
+            "dodge" => (0, 0, 0x1003),
+            "specialattack" => (0, 0, 4),
+            // The jk-side commands (`ForcePowers`, `SaberFighting`, ...) are registered by a
+            // different startup and keep the port's own clocks until they are ported.
+            _ => (0, 0, 0),
         }
     }
 
@@ -4457,68 +4479,453 @@ impl Runtime {
         !attached
     }
 
-    pub fn emit_ai_event(&mut self, actor: usize, event: u32, source: Option<usize>) -> bool {
-        let Some(thing) = self.things.get(actor) else {
-            return false;
-        };
-        if thing.flags & 0x202 != 0 || thing.health <= 0.0 {
-            return false;
-        }
-        let flags = self.ai_flags.get(&actor).copied().unwrap_or(0);
-        if flags & 0x2000 != 0 {
-            return false;
-        }
-        if flags & 0x1000 != 0 {
-            if event != 2 {
-                return false;
-            }
-            self.ai_flags.insert(actor, flags & !0x1000);
-        }
-        let Some(class) = self.ai.get(&actor).cloned() else {
-            return false;
-        };
-        for instinct in &class.instincts {
-            if Self::instinct_event_mask(&instinct.name) & event == 0 {
-                continue;
-            }
-            let acted = match (instinct.name.to_ascii_lowercase().as_str(), event) {
-                ("dodge", 1) => {
-                    source.is_some_and(|attacker| self.dodge_from_damage(actor, attacker))
-                }
-                ("dodge", 0x1000) => {
-                    let shot = source.and_then(|s| self.things.get(s).map(|t| t.pos));
-                    shot.is_some_and(|shot| self.dodge_from_shot(actor, shot))
-                }
-                ("sensedanger", 1) => {
-                    source.is_some_and(|attacker| self.sensedanger_from_damage(actor, attacker))
-                }
-                ("sensedanger", 2) => self.sensedanger_from_awareness(actor, instinct.weight),
-                // `dodge`'s event-2 arm (`0x50b5c1`) is dead content, not unported: it demands the
-                // awareness source be a **weapon thing** (`[source+0xc] == 3`, `SITH_THING_WEAPON`)
-                // whose `[source+0x10]` is 1, and every shipped event records the thing that made the
-                // noise (an actor or the player), not the projectile.
-                ("dodge", 2) => false,
-                ("jump", 0x400) => self.jump_from_obstacle(actor, instinct.weight),
-                ("specialattack", 4) => source.is_some_and(|target| {
-                    // `sithAICmd_SpecialAttack` event 4: damage the collided player with
-                    // `DAMAGE_SABER` at `fltArg[8]` (Maw 10000, Pic 2000), then rearm.
-                    let damage = instinct.args.get(7).copied().unwrap_or(0.0);
-                    if damage <= 0.0 || target == actor {
-                        return false;
-                    }
-                    self.damage_typed(target as i64, damage, DAMAGE_SABER);
-                    self.ai_special.insert(actor, self.time + 1.0);
-                    true
-                }),
-                _ => false,
+    pub fn emit_ai_event(&mut self, actor: usize, mut event: u32, source: Option<usize>) -> bool {
+        // `sithAI_EmitEvent` (`0x4e9f80`) loops: dispatch, then — when a handler changed the mode
+        // word — re-dispatch as the 0x100 mode-change event with the old word as its argument, until
+        // the word stops changing. `acted` reports whether any handler in the chain returned
+        // non-zero (the engine returns void; the port's callers and tests read it).
+        let mut acted_any = false;
+        loop {
+            let Some(thing) = self.things.get(actor) else {
+                return acted_any;
             };
-            if acted {
-                return true;
+            // The outer gates, in engine order: a live non-`0x202` thing, the global AI switch, the
+            // `0x2000` sleep word, then the `0x1000` one-shot latch — which only event 2 passes and
+            // which passing clears. The latch is **set** by `sithAI_Create`'s `0x1004` seed, so a
+            // placed actor is dormant until the awareness sweep's event 2 reaches it.
+            if thing.flags & 0x202 != 0 || thing.health <= 0.0 {
+                return acted_any;
             }
+            if self.ai_disabled_global {
+                return acted_any;
+            }
+            let flags = self.ai_flags.get(&actor).copied().unwrap_or(0);
+            if flags & 0x2000 != 0 {
+                return acted_any;
+            }
+            if flags & 0x1000 != 0 {
+                if event != 2 {
+                    return acted_any;
+                }
+                self.ai_flags.insert(actor, flags & !0x1000);
+            }
+            // Event 0x100 tells the actor's own cogs (`ThingSendMessageEx(thing, 0, 0x18, 256.0)`).
+            if event == 0x100 {
+                self.send_thing_message(actor, "aievent", [256.0, 0.0]);
+            }
+            let Some(class) = self.ai.get(&actor).cloned() else {
+                return acted_any;
+            };
+            let mut acted = false;
+            for instinct in &class.instincts {
+                if Self::instinct_registry(&instinct.name).2 & event == 0 {
+                    continue;
+                }
+                acted = match (instinct.name.to_ascii_lowercase().as_str(), event) {
+                    ("dodge", 1) => {
+                        source.is_some_and(|attacker| self.dodge_from_damage(actor, attacker))
+                    }
+                    ("dodge", 0x1000) => {
+                        let shot = source.and_then(|s| self.things.get(s).map(|t| t.pos));
+                        shot.is_some_and(|shot| self.dodge_from_shot(actor, shot))
+                    }
+                    ("sensedanger", 1) => {
+                        source.is_some_and(|attacker| self.sensedanger_from_damage(actor, attacker))
+                    }
+                    ("sensedanger", 2) => self.sensedanger_from_awareness(actor, instinct.weight),
+                    // `dodge`'s event-2 arm (`0x50b5c1`) is dead content, not unported: it demands the
+                    // awareness source be a **weapon thing** (`[source+0xc] == 3`, `SITH_THING_WEAPON`)
+                    // whose `[source+0x10]` is 1, and every shipped event records the thing that made the
+                    // noise (an actor or the player), not the projectile.
+                    ("dodge", 2) => false,
+                    ("jump", 0x400) => self.jump_from_obstacle(actor, instinct.weight),
+                    ("specialattack", 4) => source.is_some_and(|target| {
+                        // `sithAICmd_SpecialAttack` event 4: damage the collided player with
+                        // `DAMAGE_SABER` at `fltArg[8]` (Maw 10000, Pic 2000), then rearm.
+                        let damage = instinct.args.get(7).copied().unwrap_or(0.0);
+                        if damage <= 0.0 || target == actor {
+                            return false;
+                        }
+                        self.damage_typed(target as i64, damage, DAMAGE_SABER);
+                        self.ai_special.insert(actor, self.time + 1.0);
+                        true
+                    }),
+                    // `lobfire`'s event-`0x100` branch (`0x509cd0`): holster or draw the weapon with
+                    // the awake bit, then re-arm in 1000 ms (the scheduler's default arm). Its
+                    // scheduler branch fires the lobbed shot itself — the fire path is #93's region.
+                    ("lobfire", 0x100) => {
+                        let flags = self.ai_flags.get(&actor).copied().unwrap_or(0);
+                        self.armed_mode.insert(actor, u32::from(flags & 0x200 != 0));
+                        false
+                    }
+                    // primaryfire/turretfire/crouch also carry the 0x100 bit; their event arms are
+                    // not ported (#91/#93).
+                    _ => false,
+                };
+                if acted {
+                    break;
+                }
+            }
+            acted_any |= acted;
+            if self.ai_flags.get(&actor).copied().unwrap_or(0) == flags {
+                return acted_any;
+            }
+            // The mode word changed under the dispatch: cascade.
+            event = 0x100;
         }
-        false
     }
 
+
+    /// `sithAI_Process` (`0x4e9e20`): the per-slot gates before an instinct pass. The thing gates
+    /// (`0x202` flags, health above `_DAT_0052304c` = 0.0, read from the shipped image) and the
+    /// mode word's `0x3000` family — the shipped scripts' `0x2000` sleep switch **and** the
+    /// `0x1000` one-shot latch `sithAI_Create` seeds — are checked by the caller inside the tick's
+    /// actor loop; what remains here is the pass deadline (`ai + 0x190 <= now`), which holds the
+    /// whole slot until the earliest armed instinct of the modes the word accepts comes due.
+    fn ai_process(&mut self, index: usize, player: usize, dt: f32, ctx: &AiCtx) {
+        if self
+            .ai_next_due
+            .get(&index)
+            .is_some_and(|due| *due > self.time)
+        {
+            return;
+        }
+        self.ai_instinct_update(index, player, dt, ctx);
+    }
+
+    /// `sithAI_InstinctUpdate` (`0x4e9e90`): one pass over the actor's instincts in class-file
+    /// order. An instinct runs only when the registry's accept word intersects the AI mode word,
+    /// its reject word does not, and the instance's own clock is due; the clock is armed at
+    /// `now + 1000 ms` **before** the handler runs (the handler may re-arm itself — `talk` at its
+    /// own first number, `lookfortarget` at its class interval). A handler that returns non-zero
+    /// after the mode word changed raises the `0x100` mode-change cascade and **restarts the scan
+    /// from the first instinct**. The pass writes the slot's next deadline (`ai + 0x190`) as the
+    /// earliest armed clock of the accepted instincts, `now + 5000` at the most.
+    fn ai_instinct_update(&mut self, index: usize, player: usize, dt: f32, ctx: &AiCtx) {
+        let Some(count) = self.ai.get(&index).map(|class| class.instincts.len()) else {
+            return;
+        };
+        self.ai_inst.entry(index).or_default().resize(count, 0.0);
+        let mut next_pass = self.time + 5.0;
+        'scan: loop {
+            let Some(class) = self.ai.get(&index).cloned() else {
+                return;
+            };
+            let flags_at_scan = self.ai_flags.get(&index).copied().unwrap_or(0);
+            for i in 0..count {
+                let (accept, reject, _) = Self::instinct_registry(&class.instincts[i].name);
+                let flags = self.ai_flags.get(&index).copied().unwrap_or(0);
+                if accept & flags == 0 || reject & flags != 0 {
+                    continue;
+                }
+                if self.ai_inst[&index][i] <= self.time {
+                    // Arm before the call, exactly as the engine does.
+                    self.ai_inst.get_mut(&index).unwrap()[i] = self.time + 1.0;
+                    let instinct = class.instincts[i].clone();
+                    let acted = self.ai_instinct_handler(index, i, &instinct, player, dt, ctx);
+                    if acted
+                        && self.ai_flags.get(&index).copied().unwrap_or(0) != flags_at_scan
+                    {
+                        let _ = self.emit_ai_event(index, 0x100, None);
+                        continue 'scan;
+                    }
+                }
+                let armed = self.ai_inst[&index][i];
+                if armed < next_pass {
+                    next_pass = armed;
+                }
+            }
+            self.ai_next_due.insert(index, next_pass);
+            return;
+        }
+    }
+
+    /// One instinct's handler, dispatched by class-line name. Handlers whose engine bodies are
+    /// ported elsewhere (the fire arms, #93; the perception chain, #91) or not yet answer `false`
+    /// and keep the scheduler's default `now + 1000 ms` re-arm. The engine's `0x50*` handler
+    /// addresses are on each arm.
+    fn ai_instinct_handler(
+        &mut self,
+        index: usize,
+        slot: usize,
+        instinct: &crate::ai::Instinct,
+        player: usize,
+        dt: f32,
+        ctx: &AiCtx,
+    ) -> bool {
+        let rearm = |rt: &mut Self, next: f32| {
+            if let Some(slots) = rt.ai_inst.get_mut(&index) {
+                if let Some(clock) = slots.get_mut(slot) {
+                    *clock = next;
+                }
+            }
+        };
+        match instinct.name.to_ascii_lowercase().as_str() {
+            // `talk` (`0x50be20`): idle chatter on its own clock — the handler re-arms at
+            // `now + fltArg[0]` before it decides anything, rolls fltArg[1], and picks the mood
+            // from the mode word and the health fraction. Always returns 0.
+            "talk" => {
+                rearm(
+                    self,
+                    self.time + (instinct.weight / 1000.0).max(0.05),
+                );
+                let chance = instinct.args.first().copied().unwrap_or(0.0) as f64;
+                let max_health = self
+                    .template_max_health
+                    .get(&ctx.template)
+                    .copied()
+                    .unwrap_or(ctx.health)
+                    .max(1.0);
+                if crate::cog::pseudo_random() < chance
+                    && let Some(mode) = talk_mode(
+                        self.ai_flags.get(&index).copied().unwrap_or(0),
+                        ctx.health / max_health,
+                    )
+                {
+                    self.queue_mode_sound(index, mode, ctx.from);
+                }
+                false
+            }
+            // `lookfortarget` (`0x50aa80`, accept `0x204`): the engine branches on the mode word —
+            // `0x200` set runs **branch B** only (the memory-decay wake: `last_seen + fltArg[1] <
+            // now` clears the searching word and sets the awake bit); `0x200` clear with `0x4` set
+            // runs **branch A**, the scan: re-arm at the class interval, refresh sight, and on a
+            // find write `(flags & !4) | 0x232`, play the spot sound, remember, and broadcast a
+            // kind-0 awareness event at strength 3.0.
+            "lookfortarget" => {
+                if std::env::var_os("BK_NO_SCAN").is_some() {
+                    return false;
+                }
+                let flags = self.ai_flags.get(&index).copied().unwrap_or(0);
+                if flags & 0x200 != 0 {
+                    // Branch B: the memory-decay timeout (fltArg[1], 40000 ms shipped).
+                    let decay = instinct.args.first().copied().unwrap_or(0.0) / 1000.0;
+                    if decay > 0.0
+                        && self.time
+                            >= self.ai_last_seen_at.get(&index).copied().unwrap_or(0.0) + decay
+                    {
+                        self.ai_flags.insert(index, (flags & 0xffff_f9dd) | 0x4);
+                        return true;
+                    }
+                    return false;
+                }
+                if flags & 0x4 == 0 {
+                    return false;
+                }
+                let interval = (instinct.weight / 1000.0).max(0.05);
+                rearm(self, self.time + interval);
+                let Some(class) = self.ai.get(&index).cloned() else {
+                    return false;
+                };
+                let player_radius = self
+                    .templates
+                    .get(player)
+                    .and_then(|name| self.template_hit.get(&name.to_ascii_lowercase()))
+                    .map(|(radius, _)| *radius)
+                    .unwrap_or(0.065);
+                let (dx, dy, dz) = (
+                    ctx.target[0] - ctx.eye[0],
+                    ctx.target[1] - ctx.eye[1],
+                    ctx.target[2] - ctx.eye[2],
+                );
+                let range = ((dx * dx + dy * dy + dz * dz).sqrt() - player_radius).max(0.0);
+                let in_cone = class.cone(ctx.eye, ctx.yaw, ctx.target)
+                    && range <= class.sightdist;
+                let (blocked, thing_blocked) = self.solids.as_ref().map_or((false, false), |s| {
+                    (s.segment_blocked(ctx.eye, ctx.target), s.segment_thing(ctx.eye, ctx.target))
+                });
+                if std::env::var("BK_AI_TRACE").is_ok_and(|v| v == "2") {
+                    eprintln!(
+                        "ai: {index} `{}` scan at {:.2} s range {range:.2} cone {in_cone} blocked {blocked} thing {thing_blocked} flags {flags:#x}",
+                        ctx.template, self.time
+                    );
+                }
+                if in_cone && !blocked && !thing_blocked && self.can_detect(index, player) {
+                    self.ai_detected.insert(index);
+                    self.remember(index, ctx.target, "lookfortarget");
+                    let flags = self.ai_flags.entry(index).or_insert(0);
+                    *flags = (*flags & 0xffff_fffb) | 0x232;
+                    if let Some(sector) = self.things.get(player).map(|t| t.sector) {
+                        self.transmit_awareness(sector, 0, ctx.from, AI_AWARE_SIGHT, Some(player));
+                    }
+                    if std::env::var_os("BK_AI_TRACE").is_some() {
+                        eprintln!(
+                            "ai: {index} `{}` LookForTarget finds the body at {range:.2}",
+                            ctx.template
+                        );
+                    }
+                    return true;
+                }
+                false
+            }
+            // `sensedanger` (`0x50b9b0`, accept 4 reject 0x800): the scheduler branch looks the
+            // player over once a second while awake and not yet alerted; a roll under fltArg[1]
+            // that sees the player alerts: `flags & ~4 | 0x800`, the fear sound, a kind-1
+            // awareness event at 3.0, and the player in the target slot.
+            "sensedanger" => {
+                let chance = instinct.args.first().copied().unwrap_or(0.0);
+                if chance == 0.0 || self.player_dead || !ctx.sighted {
+                    return false;
+                }
+                if crate::cog::pseudo_random() >= chance as f64 {
+                    return false;
+                }
+                let flags = self.ai_flags.get(&index).copied().unwrap_or(0);
+                self.ai_flags.insert(index, (flags & !0x4) | 0x800);
+                self.remember(index, ctx.target, "sensedanger");
+                if self
+                    .ai
+                    .get(&index)
+                    .is_some_and(|c| c.instinct("Withdraw").is_some())
+                {
+                    self.ai_withdraw.entry(index).or_insert((player, None));
+                }
+                self.queue_mode_sound(index, "fear", ctx.from);
+                self.transmit_awareness(ctx.sector, 1, ctx.from, AI_AWARE_ALERT, Some(index));
+                if std::env::var_os("BK_AI_TRACE").is_some() {
+                    eprintln!(
+                        "ai: {index} senses the danger and alerts sector {} from {:?}",
+                        ctx.sector, ctx.from
+                    );
+                }
+                true
+            }
+            // `roam` (`0x50b830`): only while **not** searching (`flags & 2 == 0`): pick a random
+            // point inside fltArg[0] around the home anchor, re-armed at the class interval.
+            "roam" => {
+                if self.ai_flags.get(&index).copied().unwrap_or(0) & 0x2 != 0 {
+                    return false;
+                }
+                let Some(home) = self.ai_home.get(&index).copied() else {
+                    return false;
+                };
+                rearm(self, self.time + (instinct.weight / 1000.0).max(0.5));
+                let radius = instinct.args.first().copied().unwrap_or(2.0).max(0.0);
+                let angle = crate::cog::pseudo_random() as f32 * std::f32::consts::TAU;
+                let reach = radius * (0.25 + 0.75 * crate::cog::pseudo_random() as f32);
+                self.ai_roam.insert(
+                    index,
+                    [
+                        home[0] + angle.cos() * reach,
+                        home[1] + angle.sin() * reach,
+                        home[2],
+                    ],
+                );
+                true
+            }
+            // `randomturn` (`0x50b700`): needs the awake bit (its registry word is 4); picks a
+            // random direction every class interval (5000 ms when the first number is 0).
+            "randomturn" => {
+                rearm(
+                    self,
+                    self.time + if instinct.weight > 0.0 {
+                        instinct.weight / 1000.0
+                    } else {
+                        5.0
+                    },
+                );
+                self.ai_randomturn
+                    .insert(index, ctx.yaw + crate::cog::pseudo_random() as f32 * 360.0);
+                true
+            }
+            // `opendoors` (`0x50abc0`): the player's own activate action on the actor's body,
+            // only while the moving bit `0x1` is set. Returns 0; the scheduler's now+1000 arm is
+            // the handler's own re-arm.
+            "opendoors" => {
+                if self.ai_flags.get(&index).copied().unwrap_or(0) & 0x1 == 0 {
+                    return false;
+                }
+                let reach = self.activate_reach(index);
+                let dir = [-ctx.yaw.to_radians().sin(), ctx.yaw.to_radians().cos(), 0.0];
+                self.sith_player_actions_activate(index, ctx.from, dir, reach, ctx.sector);
+                false
+            }
+            // `hitandrun` (`0x50bb90`, accept `0xc00`): per firing pass `acc += 1000`; a pass that
+            // did not fire resets it; `fltArg[0] < acc` breaks off (`flags |= 0x800`, next at
+            // `now + fltArg[1]`). The port reads "fired" as the last shot inside half a second,
+            // its stand-in for the engine's just-fired bit `0x400`.
+            "hitandrun" => {
+                let fired = ctx.sighted
+                    && self
+                        .last_shot
+                        .get(&index)
+                        .is_some_and(|at| self.time - at < 0.5);
+                if !fired {
+                    self.ai_hitrun.remove(&index);
+                    return false;
+                }
+                let hold_ms = instinct.weight.max(1.0);
+                let break_off = instinct.args.first().copied().unwrap_or(3000.0).max(1.0) / 1000.0;
+                let acc = self.ai_hitrun.entry(index).or_insert(0.0);
+                *acc += 1000.0;
+                if hold_ms < *acc {
+                    self.ai_hitrun.remove(&index);
+                    self.ai_withdraw.insert(index, (player, Some(self.time + break_off)));
+                    rearm(self, self.time + break_off);
+                    return true;
+                }
+                false
+            }
+            // `retreat` (`0x50bc60`, accept 2 reject 0x800): when health falls under
+            // `fltArg[0] x max` and a `fltArg[1]` roll passes, set the alert bit and remember the
+            // player in the target slot (the port's `ai_withdraw` walk stands in for the
+            // `withdraw` handler's move).
+            "retreat" => {
+                if self.ai_withdraw.contains_key(&index) {
+                    return false;
+                }
+                let max_health = self
+                    .template_max_health
+                    .get(&ctx.template)
+                    .copied()
+                    .unwrap_or(0.0);
+                let fraction = instinct.weight;
+                let chance = instinct.args.first().copied().unwrap_or(0.0) as f64;
+                if max_health > 0.0
+                    && ctx.health < fraction * max_health
+                    && self.things.get(player).is_some_and(|t| !t.destroyed)
+                    && crate::cog::pseudo_random() < chance
+                {
+                    let flags = self.ai_flags.entry(index).or_insert(0);
+                    *flags |= 0x800;
+                    self.ai_withdraw.insert(index, (player, None));
+                    return true;
+                }
+                false
+            }
+            // `circlestrafe` (`0x509890`): replan the ring point every class interval while the
+            // target is inside the engage distance; the frame's walk half reads the goal.
+            "circlestrafe" => {
+                if !ctx.sighted {
+                    return false;
+                }
+                let (tx, ty) = (ctx.target[0] - ctx.from[0], ctx.target[1] - ctx.from[1]);
+                let dist = (tx * tx + ty * ty).sqrt();
+                let angle = instinct.args.first().copied().unwrap_or(30.0) as f32;
+                let engage = instinct.args.get(1).copied().unwrap_or(1.0) as f32;
+                if dist <= 0.2 || dist > engage.max(0.2) {
+                    return false;
+                }
+                let side = *self.ai_strafe.entry(index).or_insert_with(|| {
+                    if crate::cog::pseudo_random() < 0.5 { -1.0 } else { 1.0 }
+                });
+                let (sin, cos) = (angle * side).to_radians().sin_cos();
+                let (vx, vy) = (-tx, -ty);
+                let interval = (instinct.weight / 1000.0).max(0.05);
+                self.ai_strafe_goal.insert(
+                    index,
+                    [
+                        ctx.target[0] + vx * cos - vy * sin,
+                        ctx.target[1] + vx * sin + vy * cos,
+                        ctx.target[2],
+                    ],
+                );
+                rearm(self, self.time + interval);
+                true
+            }
+            _ => false,
+        }
+    }
     /// The nearest actor a shot from `from` along `dir` would sweep into within `range` — the port's
     /// stand-in for the engine's `sithCollision_SearchForCollisions` in the player-fire pre-sweep. The
     /// engine collides the shot by its own `movesize` against the actor's body cylinder; this uses the
@@ -4804,6 +5211,7 @@ impl Runtime {
             eprintln!("ai: {actor} remembers the body at {target:?} ({why})");
         }
         self.ai_last_seen.insert(actor, target);
+        self.ai_last_seen_at.insert(actor, self.time);
     }
 
     pub fn can_detect(&self, actor: usize, target: usize) -> bool {
@@ -4845,7 +5253,24 @@ impl Runtime {
             {
                 body.ai_wait = offset(phase.fire_ms);
             }
-            self.ai_scan.insert(*index, due(phase.acquire_ms, self.time));
+            // `acquire_next_ms` is the `lookfortarget` instinct's own clock; `next_pass_ms` is the
+            // slot's whole-AI deadline (`ai + 0x190`). Both seed the scheduler's slots.
+            if let Some(class) = self.ai.get(index) {
+                let count = class.instincts.len();
+                let slots = self.ai_inst.entry(*index).or_default();
+                slots.resize(count, 0.0);
+                if let Some(slot) = class
+                    .instincts
+                    .iter()
+                    .position(|i| i.name.eq_ignore_ascii_case("LookForTarget"))
+                {
+                    if let Some(clock) = slots.get_mut(slot) {
+                        *clock = due(phase.acquire_ms, self.time);
+                    }
+                }
+            }
+            self.ai_next_due
+                .insert(*index, due(phase.next_pass_ms, self.time));
             self.ai_detect_at.insert(*index, due(phase.next_pass_ms, self.time));
         }
     }
@@ -4913,48 +5338,29 @@ impl Runtime {
         for index in actors {
             let ai = self.ai.get(&index).cloned();
             let ai_template = self.templates.get(index).cloned().unwrap_or_default();
-            // `AISetMode`/`AIClearMode` (`sithCogFunctionAI_AISetMode`, recovered at `0x500f50`) OR the
-            // argument into the AI's **own** flag word (`ai + 8`), which is the word every instinct
-            // handler tests — so those flags are behaviour, not decoration. `0x2000` is the switch-off
-            // the shipped sleep/trap scripts use (`00_aisleep.cog` "aisetmode(enemy, 0x2000)",
-            // `06_hidethings1.cog`, `00_cameratricks.cog` "shuts off dark jedi"), and with it set the
-            // engine's instincts do nothing at all; the actor stays standing until a script clears it
-            // (`aiclearmode(turret, 0x2000)` in `06_turrettrap.cog`).
-            if self.ai_flags.get(&index).copied().unwrap_or(0) & 0x2000 != 0 {
+            // `sithAI_Process` (`0x4e9e20`) gates one AI slot before its instinct pass: the thing is
+            // not `0x202`-flagged, its health is above `_DAT_0052304c` (0.0, read from the shipped
+            // image), and the AI mode word carries none of the **`0x3000` family** — the shipped
+            // scripts' `0x2000` sleep switch (`00_aisleep.cog` "aisetmode(enemy, 0x2000)") **and**
+            // the `0x1000` one-shot latch `sithAI_Create` (`0x4e9cb0`) seeds with its `0x1004`, which
+            // only the awareness sweep's event 2 clears: a placed actor runs no instinct at all until
+            // something in its sector makes a noise or a spotter broadcasts the player. The pass
+            // deadline (`ai + 0x190`) is checked inside `ai_process`.
+            if let Some(thing) = self.things.get(index)
+                && (thing.flags & 0x202 != 0 || thing.health <= 0.0)
+            {
+                continue;
+            }
+            if self.ai_flags.get(&index).copied().unwrap_or(0) & 0x3000 != 0 {
                 if let Some(thing) = self.things.get_mut(index) {
                     thing.ai_target = None;
                 }
                 continue;
             }
-            // `opendoors` (handler `0x50abc0`) runs the **player's activate action** on the actor's own
-            // body: `sithPlayerActions_Activate` (`0x4fc0a0`), which is where the 250 ms wait and the
-            // `moveSize + 0.1` reach come from, so the player's press and an actor's instinct share one
-            // clock and one rule. The handler only calls it while the AI flag word's bit `0x1` (moved)
-            // is set, and writes `now + 1000 ms` into its own state — the instinct's re-arm. Calling it
-            // every tick made an actor standing on a door's link message that link `activated` 60
-            // times a second (level 1's `00_doorswitch.cog` answered each with its lock sound).
-            if ai
-                .as_ref()
-                .is_some_and(|class| class.instinct("OpenDoors").is_some())
-                && self.ai_flags.get(&index).copied().unwrap_or(0) & 0x1 != 0
-                && self.time >= self.ai_opendoors.get(&index).copied().unwrap_or(0.0)
-                && let Some(body) = self.things.get(index)
-            {
-                self.ai_opendoors.insert(index, self.time + 1.0);
-                let (pos, yaw, sector) = (body.pos, body.yaw, body.sector);
-                let reach = self.activate_reach(index);
-                let dir = [-yaw.to_radians().sin(), yaw.to_radians().cos(), 0.0];
-                self.sith_player_actions_activate(index, pos, dir, reach, sector);
-            }
             let Some(thing) = self.things.get_mut(index) else { continue };
             if thing.destroyed || self.types.get(index).copied() != Some(2) {
                 continue;
             }
-            // The AI's **moving** bit (`0x1`): `jump` refuses without it and `dodge` refuses with it.
-            // Cleared here and set by the step below, so it means "moved this tick" — the engine sets
-            // it while the AI has a move, and the port never wrote it, which left `jump` unreachable
-            // from a real walk and let `dodge` fire mid-stride.
-            *self.ai_flags.entry(index).or_insert(0) &= !0x1;
             // The firing cadence gates the *shot*, not the legs: an actor that has just
             // fired keeps walking, which is what makes it close the distance instead of
             // stopping for a second every shot.
@@ -4975,53 +5381,6 @@ impl Runtime {
                     .unwrap_or(0.065);
                 [from[0], from[1], from[2] + radius + 0.01]
             };
-            // `talk` (`0x50be20`, the second-most-used instinct after `listen`: 198 classes): idle
-            // chatter on the instinct's own clock. Its first number is the interval in milliseconds
-            // (`talk 10000.0, 0.10` in most shipped classes, `3000.0, 0.40` in `boc`) and the second
-            // the chance; a success picks a mood from the AI flag word and the health fraction
-            // (`talk_mode`) and plays a random row of the actor's own `.snd` class for it. The
-            // handler's own upstream gate (the AI's one-shot bit) is not modelled.
-            if let Some(talk) = ai.as_ref().and_then(|class| class.instinct("Talk")).cloned() {
-                let due = self.ai_talk.get(&index).copied().unwrap_or(self.time);
-                if self.time >= due {
-                    self.ai_talk
-                        .insert(index, self.time + (talk.weight / 1000.0).max(0.05));
-                    let chance = talk.args.first().copied().unwrap_or(0.0) as f64;
-                    let max_health = self
-                        .template_max_health
-                        .get(&ai_template)
-                        .copied()
-                        .unwrap_or(health)
-                        .max(1.0);
-                    if crate::cog::pseudo_random() < chance
-                        && let Some(mode) = talk_mode(
-                            self.ai_flags.get(&index).copied().unwrap_or(0),
-                            health / max_health,
-                        )
-                    {
-                        self.queue_mode_sound(index, mode, from);
-                    }
-                }
-            }
-            // `LobFire` (`0x509cd0`) — the name promises a lobbed shot, but its handler's mask is
-            // `0x100` and that branch does not fire: it calls
-            // `sithPuppet_SetArmedMode(thing, (ai flags & 0x200) != 0)` and re-arms in 1000 ms. `0x200`
-            // is the awake bit `00_aisleep.cog` writes (`aisetmode(enemy, 0x200)`), so a wakeable ryther
-            // draws its weapon when it wakes and holsters when it sleeps. The `param_4 == 0` branch —
-            // the one that calls `sithAI_FireWeapon` with a lobbed chance — is **dead content**: the
-            // engine's emit inventory raises only 1, `0x100`, `0x400`, `0x800`, `0x1000` and event 2
-            // from the awareness sweep, so no event-0 reaches it.
-            if ai
-                .as_ref()
-                .is_some_and(|class| class.instinct("LobFire").is_some())
-            {
-                let due = self.ai_lobfire.get(&index).copied().unwrap_or(self.time);
-                if self.time >= due {
-                    self.ai_lobfire.insert(index, self.time + 1.0);
-                    let flags = self.ai_flags.get(&index).copied().unwrap_or(0);
-                    self.armed_mode.insert(index, u32::from(flags & 0x200 != 0));
-                }
-            }
             // `maxrotthrust=` is the angular rate the body can turn at (50-85 degrees a second for
             // level 1's gunners). Snapping the yaw let every actor face the player the instant it
             // noticed them, which is what made the port's fights start and finish faster than
@@ -5110,6 +5469,27 @@ impl Runtime {
                     sighted = false;
                 }
             }
+            // `sithAI_Process` -> `sithAI_InstinctUpdate`: the instinct pass runs after the sight
+            // preamble (its handlers read the same eye/sight facts) and before the frame's motion
+            // half — the engine's own order (decisions in the scheduler, motion in `sithAI_Tick`).
+            let ctx = AiCtx {
+                from,
+                yaw,
+                sector: self.things.get(index).map(|t| t.sector).unwrap_or(-1),
+                eye,
+                target,
+                sighted,
+                health,
+                template: ai_template.clone(),
+            };
+            if ai.is_some() {
+                self.ai_process(index, player, dt, &ctx);
+            }
+            // The AI's **moving** bit (`0x1`) clears here — after the instinct pass (whose handlers
+            // read it the way the engine's scheduler does: "the AI has a move") and before the walk
+            // phase below sets it again on a tick the body actually moved. `jump` refuses without it
+            // and `dodge` refuses with it.
+            *self.ai_flags.entry(index).or_insert(0) &= !0x1;
             // `forcepowers` (`0x40ff40`): the handler's own clock is `fltArg[0]`; while the target is
             // visible (`ai + 0x1f4 == 0`) and the ability cooldown (`ai + 0x288`) has passed, it
             // rolls one number against the class line's three chances and sends `user0` (id 27) to
@@ -5231,89 +5611,14 @@ impl Runtime {
             // `sithAI_CanDetectSightThing`). Writing it on the bare line test seeded every actor within
             // `sightdist` with the player's spawn point on the first frame, which is what walked level
             // 1's cantina patrons at a player they had not noticed (round 307).
-            // `sensedanger` (`0x50b9b0`, 14 classes): an **awake** actor (`AISetMode(..., 0x4)` — what
-            // the scripts set for the droids and remotes) whose class enables the instinct (its second
-            // number is non-zero; most shipped lines are `sensedanger 0.10, 0.00` and never act) looks
-            // the player over once a second while it is not yet alerted. Seeing them clears the awake
-            // bit, sets the alert bit (`0x800`, also what `talk` reads for its `fear`/`gloat` moods),
-            // plays the class's `fear` sound, raises a strength-3.0 awareness event at its own position
-            // so the same side converges, and makes the player its target. The engine's own helper
-            // (`sithAI_sub_4EAD60`) refreshes the target through `CheckSightThing`; the port's `sighted`
-            // is that same range/cone/clear-line test.
-            let sense_flags = self.ai_flags.get(&index).copied().unwrap_or(0);
-            if sense_flags & 0x4 != 0
-                && sense_flags & 0x800 == 0
-                && !self.player_dead
-                && let Some(sense) = ai.as_ref().and_then(|c| c.instinct("SenseDanger")).cloned()
-                && sense.args.first().copied().unwrap_or(0.0) != 0.0
-            {
-                let due = self.ai_sense.get(&index).copied().unwrap_or(0.0);
-                let chance = sense.args.first().copied().unwrap_or(0.0);
-                if self.time >= due {
-                    // The instinct's first number is the **chance** the handler rolls once per second
-                    // (0.10 in most shipped classes); the port used it only as an on/off switch, so
-                    // every awake actor that could see the player alerted on its first tick - level
-                    // 1's bartender and `nman1` then walked through the player's own view (round 307).
-                    if sighted && crate::cog::pseudo_random() < chance as f64 {
-                        // `flags & ~0x4 | 0x800`, exactly the handler's two writes.
-                        self.ai_flags.insert(index, (sense_flags & !0x4) | 0x800);
-                        self.remember(index, target, "sensedanger");
-                        // The handler also writes its target into `ai[0x70]` (`param_1[0x70] = player`),
-                        // which is the slot `withdraw` reads — so a class with `Withdraw` but **no**
-                        // `Retreat` (six of the thirty shipped) still backs away from a surprise.
-                        if ai.as_ref().is_some_and(|c| c.instinct("Withdraw").is_some()) {
-                            self.ai_withdraw.entry(index).or_insert((player, None));
-                        }
-                        self.queue_mode_sound(index, "fear", from);
-                        let side = ai.as_ref().map(|c| c.alignment as i32).unwrap_or(0);
-                        let sector = self.things.get(index).map(|t| t.sector).unwrap_or(-1);
-                        // The engine raises a weapon event (kind 1) on fire; this port's alert stands
-                        // in for the actor's own `sensedanger` cry, at the same kind and the strength
-                        // the port tuned (round 307), with the actor as the source.
-                        self.transmit_awareness(
-                            sector,
-                            1,
-                            from,
-                            AI_AWARE_ALERT,
-                            Some(index),
-                        );
-                        if std::env::var_os("BK_AI_TRACE").is_some() {
-                            eprintln!(
-                                "ai: {index} senses the danger and alerts sector {sector} side {side} from {from:?}"
-                            );
-                        }
-                    } else {
-                        self.ai_sense.insert(index, self.time + 1.0);
-                    }
-                }
-            }
-            // `roam` (`0x50b830`): an actor with nothing else to do wanders around its **home**
-            // anchor — a random direction, a random distance inside the instinct's first argument, at
-            // the class interval — then `SetLookFrame` + `SetMovePos` there. The port feeds that point
-            // through the same remembered-position slot, so the wandering walk is the one already
-            // tuned; it is the last fallback, after a remembered enemy, an awareness record and home.
-            let roam_point = if let Some(roam) = ai.as_ref().and_then(|class| class.instinct("Roam")).cloned()
-                && let Some(home) = self.ai_home.get(&index).copied()
-            {
-                let (mut due, mut point) = self.ai_roam.get(&index).copied().unwrap_or((0.0, home));
-                if self.time >= due {
-                    due = self.time + (roam.weight / 1000.0).max(0.5);
-                    let radius = roam.args.first().copied().unwrap_or(2.0).max(0.0) as f32;
-                    let angle = crate::cog::pseudo_random() as f32 * std::f32::consts::TAU;
-                    let reach = radius * (0.25 + 0.75 * crate::cog::pseudo_random() as f32);
-                    point = [
-                        home[0] + angle.cos() * reach,
-                        home[1] + angle.sin() * reach,
-                        home[2],
-                    ];
-                }
-                self.ai_roam.insert(index, (due, point));
-                let here = self.things.get(index).map(|t| t.pos).unwrap_or(home);
+            // `roam`'s point (picked on its scheduler slot) is the last fallback of the remembered
+            // chain, after a remembered enemy, an awareness record and home. The handler only runs
+            // while the mode word lacks the searching bit `0x2`.
+            let roam_point = self.ai_roam.get(&index).copied().filter(|point| {
+                let here = self.things.get(index).map(|t| t.pos).unwrap_or(*point);
                 let d2 = (point[0] - here[0]).powi(2) + (point[1] - here[1]).powi(2);
-                (d2 > 0.25).then_some(point)
-            } else {
-                None
-            };
+                d2 > 0.25
+            });
             // `sithAIAwareness`'s record is a *position*, which is used exactly like a last-seen
             // one: the actor turns and walks there, and the fight reaches it without it having seen
             // anything itself. The record lives per **sector and side**, so an actor reads the one
@@ -5406,16 +5711,11 @@ impl Runtime {
             // is a whole mode in the engine (`sithAI_Flee`). It is a script's order, so it does not
             // need sight or a memory — read before the "nothing to do" return below, or a fleeing
             // actor that has lost the player just stands there.
-            // `retreat` (`0x50bc60`) and `withdraw` (`0x50b150`): a hurt actor backs away from what
-            // hurt it. retreat sets the mode when its health falls under `arg0 × max` (0.50 in every
-            // shipped class) and its `arg1` chance (0.25-0.50) succeeds, remembering the current
-            // target; withdraw walks the actor away from that target. The port reuses the scripted
-            // flee walk for the step. **The mode ends when the remembered target is gone**
-            // (`FUN_0050b150` clears the bit on `ai[0x70] == 0`); the instinct's own interval (5000 ms
-            // shipped) is only how often the handler runs, so the port's old "clear after the interval"
-            // stopped a withdrawal early. `hitandrun`'s break-off, by contrast, has a real deadline.
-            // A destroyed thing is a null pointer in the engine: it frees the record, so `ai[0x70]` reads
-            // zero the next time the handler runs.
+            // `retreat`/`hitandrun` are scheduler instincts now (their handlers run on
+            // `ai_instinct`'s clock); what stays here is the withdraw mode's own bookkeeping:
+            // **the mode ends when the remembered target is gone or its deadline passes**
+            // (`FUN_0050b150` clears on `ai[0x70] == 0`; `hitandrun`'s break-off has a real
+            // deadline). A destroyed thing is a null pointer in the engine: it frees the record.
             if let Some((from, until)) = self.ai_withdraw.get(&index).copied()
                 && (self
                     .things
@@ -5424,57 +5724,6 @@ impl Runtime {
                     || until.is_some_and(|u| self.time >= u))
             {
                 self.ai_withdraw.remove(&index);
-            }
-            if !self.ai_withdraw.contains_key(&index)
-                && let Some(retreat) = ai.as_ref().and_then(|c| c.instinct("Retreat")).cloned()
-            {
-                let max_health = self
-                    .template_max_health
-                    .get(&ai_template)
-                    .copied()
-                    .unwrap_or(0.0);
-                let health = self.things.get(index).map(|t| t.health).unwrap_or(0.0);
-                let fraction = retreat.weight;
-                let chance = retreat.args.first().copied().unwrap_or(0.0) as f64;
-                // A retreat needs someone to retreat **from**: with the target destroyed the engine's
-                // target pointer is null and the handler has nothing to back away from.
-                if max_health > 0.0
-                    && health < fraction * max_health
-                    && self.things.get(player).is_some_and(|t| !t.destroyed)
-                    && crate::cog::pseudo_random() < chance
-                {
-                    self.ai_withdraw.insert(index, (player, None));
-                }
-            }
-            // `hitandrun` (`0x50bb90`): fire at the target for the instinct's first argument, then break
-            // off for its second and come back. The engine accumulates **firing time**, not wall time:
-            // on every call where the just-fired bit (`0x400`) is set it does
-            // `state[8] = state[8] - _DAT_005232f4` — that constant is **-1000.0** (read out of the
-            // `.rdata`), so each firing tick adds a second — and breaks off when `first number <
-            // state[8]`; on a tick without the bit it resets the accumulator to zero. A body that fires
-            // once and then stops never accumulates at all, which a wall clock got wrong.
-            if !self.ai_withdraw.contains_key(&index)
-                && let Some(run) = ai.as_ref().and_then(|class| class.instinct("HitAndRun")).cloned()
-            {
-                let hold = run.weight.max(1.0) / 1000.0;
-                let break_off = run.args.first().copied().unwrap_or(3000.0).max(1.0) as f32 / 1000.0;
-                let fired = sighted
-                    && self
-                        .last_shot
-                        .get(&index)
-                        .is_some_and(|at| self.time - at < 0.5);
-                if !fired {
-                    // The handler's own `state[8] = 0` on a tick that is not firing.
-                    self.ai_hitrun.remove(&index);
-                } else {
-                    // Firing **seconds**, the engine's "one second per 1000 ms call" measured as time.
-                    let acc = self.ai_hitrun.entry(index).or_insert(0.0);
-                    *acc += dt;
-                    if *acc >= hold {
-                        self.ai_withdraw.insert(index, (player, Some(self.time + break_off)));
-                        self.ai_hitrun.remove(&index);
-                    }
-                }
             }
             // A scripted flee lasts the class's own `Flee` instinct duration (shipped: 1-2 s); the
             // engine's handler clears the mode at that deadline and wakes the actor again, so the port
@@ -5515,132 +5764,11 @@ impl Runtime {
                 && remembered.is_none()
                 && fleeing.is_none()
             {
-                // `LookForTarget`: an idle actor with nothing in sight periodically scans for one.
-                // The command is recovered now (`sithAICmd_Startup` registers handler 0x50aa80, round
-                // 210): it paces by the class's interval in milliseconds, then scans through
-                // `sithAI_FirstThingInView` — which sets the class's horizontal **and** vertical FOV
-                // limits before `sithAI_GetThingsInView` walks the cone — and finishes with
-                // `sithAI_CheckSightThing`'s range/facing/collision test. The class's own `sees` is that
-                // cone plus `sightdist`; scanning on range alone let an actor notice a target **behind
-                // it**, which is what the level-3 engagement divergence measured. A find goes into the
-                // last-seen slot, so the body turns and walks at the usual `maxrotthrust / surfdrag`
-                // clamp instead of snapping. Vertical limits are still approximated by the one `fov`.
-                if std::env::var_os("BK_NO_SCAN").is_none()
-                    && let Some(look) = ai.as_ref().and_then(|ai| ai.instinct("LookForTarget")).cloned()
-                {
-                    let interval = (look.weight / 1000.0).max(0.05);
-                    let due = self.ai_scan.get(&index).copied().unwrap_or(0.0);
-                    // `FUN_0050aa80`'s branch B: once the class interval passes on an actor that is
-                    // engaged (`0x200`), it clears that word and sets the awake bit again — the scan
-                    // itself (branch A) only runs while `0x4` is set.
-                    let flags = self.ai_flags.entry(index).or_insert(0);
-                    if self.time >= due && *flags & 0x4 == 0 && *flags & 0x200 != 0 {
-                        *flags = (*flags & 0xffff_f9dd) | 0x4;
-                    }
-                    if self.time >= due && *flags & 0x4 != 0 {
-                        self.ai_scan.insert(index, self.time + interval);
-                        if let Some(thing) = self.things.get(index).map(|t| (t.pos, t.sector, t.yaw)) {
-                            // `sithAI_sub_4EAD60` builds the sight eye from the thing's model offset
-                            // (`rdMatrix_TransformVector34` over `thing + 0x17c`) above its origin,
-                            // and `sithAI_CheckSightThing` measures from that eye and subtracts the
-                            // target's own radius (`param_3[0xc]`) from the distance it returns. The
-                            // scan used the thing origin, so a door actor on a balcony had a clear
-                            // line the engine's elevated eye does not.
-                            let player_radius = self
-                                .templates
-                                .get(player)
-                                .and_then(|name| self.template_hit.get(&name.to_ascii_lowercase()))
-                                .map(|(radius, _)| *radius)
-                                .unwrap_or(0.065);
-                            let (dx, dy, dz) = (
-                                target[0] - eye[0],
-                                target[1] - eye[1],
-                                target[2] - eye[2],
-                            );
-                            let range = ((dx * dx + dy * dy + dz * dz).sqrt() - player_radius).max(0.0);
-                            // `sithAI_CheckSightThing`'s two gates: the class's cone, then
-                            // `sightdist < distance - target radius` → too far. The distance it
-                            // returns (`param_8`) is that radius-subtracted value, so `range` is the
-                            // number the range gate compares.
-                            let in_cone = ai
-                                .as_ref()
-                                .is_some_and(|ai| ai.cone(eye, thing.2, target))
-                                && ai.as_ref().is_some_and(|ai| range <= ai.sightdist);
-                            // `sithAI_CheckSightThing` casts its sight ray against the level's
-                            // **collision**, which includes solid things: a railing or a body in the
-                            // way blocks the find exactly as a wall does. The scan tested only the
-                            // world faces, so level 1's door actors standing behind the balcony rail
-                            // acquired the player while retail's never did.
-                            let (blocked, thing_blocked) = self.solids.as_ref().map_or(
-                                (false, false),
-                                |s| (s.segment_blocked(eye, target), s.segment_thing(eye, target)),
-                            );
-                            let clear = !blocked && !thing_blocked;
-                            // `BK_AI_TRACE=2`: name which half of the scan's sight test refused, the
-                            // way the fire path names its own gate — the acquisition divergence the
-                            // door fixture grades turns on exactly this pair.
-                            if std::env::var("BK_AI_TRACE").is_ok_and(|v| v == "2") {
-                                eprintln!(
-                                    "ai: {index} `{ai_template}` scan at {:.2} s range {range:.2} cone {in_cone} blocked {blocked} thing {thing_blocked} flags {:#x}",
-                                    self.time, *flags
-                                );
-                            }
-                            // The scan is the **acquisition** path: the handler runs
-                            // `sithAI_CheckSightThing`, whose detection roll is
-                            // `sithAI_CanDetectSightThing` (`0x4ec140`). Writing the memory from the
-                            // cone test alone made an in-cone body a last-seen point on the first
-                            // frame, and `BlindFire` then shot at it at 0.02 s without the actor having
-                            // detected it at all.
-                            if in_cone && clear && self.can_detect(index, player) {
-                                self.ai_detected.insert(index);
-                                self.remember(index, target, "lookfortarget");
-                                // `FUN_0050aa80`'s write when the scan finds something:
-                                // `ai flags = (ai flags & 0xffff_fffb) | 0x232` — the find **clears**
-                                // the awake bit and sets the engaged/searching word, so `returnhome`
-                                // (`& 4`) stops until the class's interval wakes the actor again.
-                                let flags = self.ai_flags.entry(index).or_insert(0);
-                                *flags = (*flags & 0xffff_fffb) | 0x232;
-                                // …and the same branch broadcasts the find: `CreateTransmittingEvent(
-                                // player->sector, actor->pos, kind 0, 3.0, player)` — the spotter puts
-                                // the player on the record at its own position, so neighbours converge.
-                                if let Some(sector) = self.things.get(player).map(|t| t.sector) {
-                                    self.transmit_awareness(
-                                        sector,
-                                        0,
-                                        thing.0,
-                                        AI_AWARE_SIGHT,
-                                        Some(player),
-                                    );
-                                }
-                                if std::env::var_os("BK_AI_TRACE").is_some() {
-                                    eprintln!("ai: {index} `{ai_template}` LookForTarget finds the body at {range:.2}");
-                                }
-                                continue;
-                            }
-                        }
-                    }
-                }
                 // Out of sight and nothing remembered: the actor stands where it is, turning to a
-                // scripted look target — or, with `randomturn` (`0x50b700`), to a direction of its own
-                // choosing: every class interval (1000-2000 ms shipped) the handler picks a random
-                // direction and `SetLookFrame`s a point its argument's distance away (0.5 units in
-                // every shipped class). The port keeps the chosen yaw and turns at the body's own
-                // rate, which is what makes an idle guard sweep its view instead of snapping.
-                let mut idle_yaw = look_yaw;
-                if let Some(turn) = ai
-                    .as_ref()
-                    .and_then(|class| class.instinct("RandomTurn"))
-                    .cloned()
-                {
-                    let (mut due, mut target) =
-                        self.ai_randomturn.get(&index).copied().unwrap_or((0.0, yaw));
-                    if self.time >= due {
-                        due = self.time + (turn.weight / 1000.0).max(0.05);
-                        target = yaw + crate::cog::pseudo_random() as f32 * 360.0;
-                    }
-                    self.ai_randomturn.insert(index, (due, target));
-                    idle_yaw = Some(target);
-                }
+                // scripted look target — or, with `randomturn`, to the direction its scheduler slot
+                // last picked (`0x50b700`: a random direction every class interval). The port turns
+                // at the body's own rate, which is what makes an idle guard sweep its view.
+                let idle_yaw = look_yaw.or_else(|| self.ai_randomturn.get(&index).copied());
                 if let Some(thing) = self.things.get_mut(index) {
                     thing.ai_target = None;
                     if let Some(yaw) = idle_yaw {
@@ -5700,47 +5828,24 @@ impl Runtime {
             let mut want = scripted.or(chase).unwrap_or(from);
             let mut pace = 1.0f32;
             let mut strafing = false;
-            // `circlestrafe` (`0x509890`): while it has a target **within the instinct's own engage
-            // distance** (0.6-1.0 units in the shipped lines — this is the close-range, lightsaber
-            // behaviour), the actor steps around the target by the instinct's angle (30-45 degrees)
-            // at half speed, and keeps facing it. The side is picked at random once and kept in a
-            // signed slot, exactly as the handler persists it.
-            //
-            // The handler's own clock is the **first number** (`class+0x4c` in the same slot `talk`
-            // reads its interval from), so `circlestrafe 5000, 30, 0.6, …` replans every **5 s** and the
-            // body walks to the rotated point in between; the port recomputed the rotation every frame
-            // and orbited smoothly instead. The goal is held until the interval is up.
-            if scripted.is_none()
-                && sighted
-                && let Some(strafe) = ai.as_ref().and_then(|class| class.instinct("CircleStrafe"))
-            {
-                let (tx, ty) = (target[0] - from[0], target[1] - from[1]);
-                let dist = (tx * tx + ty * ty).sqrt();
-                let angle = strafe.args.first().copied().unwrap_or(30.0) as f32;
-                let engage = strafe.args.get(1).copied().unwrap_or(1.0) as f32;
-                if dist > 0.2 && dist <= engage.max(0.2) {
-                    let due = self.ai_strafe_goal.get(&index).map(|(due, _)| *due).unwrap_or(0.0);
-                    if self.time >= due {
-                        let side = *self.ai_strafe.entry(index).or_insert_with(|| {
-                            if crate::cog::pseudo_random() < 0.5 { -1.0 } else { 1.0 }
-                        });
-                        let (sin, cos) = (angle * side).to_radians().sin_cos();
-                        // The target -> actor vector, rotated around the target, keeps the radius and
-                        // moves the body along the ring.
-                        let (vx, vy) = (-tx, -ty);
-                        self.ai_strafe_goal.insert(
-                            index,
-                            (
-                                self.time + (strafe.weight / 1000.0).max(0.05),
-                                [target[0] + vx * cos - vy * sin, target[1] + vx * sin + vy * cos, target[2]],
-                            ),
-                        );
-                    }
-                    if let Some((_, goal)) = self.ai_strafe_goal.get(&index) {
-                        want = *goal;
-                        pace = 0.5;
-                        strafing = true;
-                    }
+            // `circlestrafe` (`0x509890`): while the target is inside the instinct's own engage
+            // distance the actor steps around it at half speed, facing it. The replan is the
+            // scheduler handler's (its own class interval); this half only walks the stored goal.
+            if scripted.is_none() && sighted {
+                let dist = ((target[0] - from[0]).powi(2) + (target[1] - from[1]).powi(2)).sqrt();
+                let engage = ai
+                    .as_ref()
+                    .and_then(|class| class.instinct("CircleStrafe"))
+                    .and_then(|strafe| strafe.args.get(1).copied())
+                    .map(|e| e as f32)
+                    .unwrap_or(1.0);
+                if dist > 0.2
+                    && dist <= engage.max(0.2)
+                    && let Some(goal) = self.ai_strafe_goal.get(&index)
+                {
+                    want = *goal;
+                    pace = 0.5;
+                    strafing = true;
                 }
             }
             // A route in hand wins over the destination: each waypoint is a doorway centre the search
@@ -5968,6 +6073,10 @@ impl Runtime {
                 // Arrived: the AI's moving bit clears with the destination, even for a class-less
                 // scripted actor that is no longer ticked from here on.
                 *self.ai_flags.entry(index).or_insert(0) &= !0x1;
+                // `sithAI_idk_msgarrived_target` (`0x4ea890`) ends an arrival by stopping the move
+                // mode, messaging the cogs `arrived`, and raising AI event `0x800` — the event
+                // `returnhome`/`withdraw`/`flee` carry in their masks.
+                let _ = self.emit_ai_event(index, 0x800, None);
             }
             // The instinct that fires. An actor whose class has no `PrimaryFire` never
             // shoots, however close the player is, and a scripted walk does not shoot at what it
@@ -10137,6 +10246,9 @@ impl Runtime {
                     self.ai_cleared.remove(&actor);
                     self.ai_detected.insert(actor);
                 }
+                if old != (old | mode) {
+                    let _ = self.emit_ai_event(actor, 0x100, None);
+                }
                 Value::Nil
             }
             "clearactorflags" => {
@@ -10167,6 +10279,9 @@ impl Runtime {
                     if std::env::var_os("BK_AI_TRACE").is_some() {
                         eprintln!("ai: AIClearMode switched thing {actor} off (mask {mode:#x})");
                     }
+                }
+                if old != (old & !mode) {
+                    let _ = self.emit_ai_event(actor, 0x100, None);
                 }
                 Value::Nil
             }
@@ -11552,6 +11667,19 @@ impl Runtime {
         }
     }
 }
+/// The per-pass facts the scheduler's handlers share with the frame's motion half: computed once
+/// per actor per tick, before the instinct pass (`sithAI_Process` runs decisions before
+/// `sithAI_Tick` moves the body).
+pub struct AiCtx {
+    pub from: [f32; 3],
+    pub yaw: f32,
+    pub sector: i32,
+    pub eye: [f32; 3],
+    pub target: [f32; 3],
+    pub sighted: bool,
+    pub health: f32,
+    pub template: String,
+}
 
 fn vec3(v: &Value) -> [f32; 3] {
     match v {
@@ -11827,6 +11955,149 @@ mod tests {
         assert_eq!(rt.call("getactorflags", &[Value::Num(1.0)]).num(), 0x8 as f64);
     }
 
+    /// `sithAI_InstinctUpdate` (`0x4e9e90`) arms a due instinct at `now + 1000` before calling it,
+    /// so an instinct fires on its own armed interval, never every frame. `talk` re-arms at its own
+    /// first number (10000 ms here): the roll happens on the first pass and not again inside it.
+    #[test]
+    fn an_instinct_fires_on_its_own_armed_interval_not_every_frame() {
+        let mut rt = door_runtime();
+        let mut actor = rt.things[0].clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        let mut player = rt.things[0].clone();
+        player.pos = [-9.0, 0.0, 0.0];
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "barkeep".into()];
+        rt.types = vec![10, 2];
+        rt.template_max_health.insert("barkeep".into(), 100.0);
+        rt.template_soundclass.insert("barkeep".into(), "pednarsh.snd".into());
+        rt.sound_classes.insert(
+            "pednarsh.snd".into(),
+            std::collections::BTreeMap::from([(
+                "happy".to_string(),
+                vec![("happy1.wav".to_string(), 0.8)],
+            )]),
+        );
+        rt.ai_flags.insert(1, 0x200);
+        rt.ai.insert(
+            1,
+            crate::ai::parse("alignment=-1.0, rank=0.5, fov=90, sightdist=2.0\n\nTalk 10000.0, 1.0\n"),
+        );
+        for _ in 0..20 {
+            rt.time += 1.0 / 30.0;
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        assert_eq!(rt.sounds.len(), 1, "the mood roll happened more than once inside the interval");
+        let armed = rt.ai_inst[&1][0];
+        assert!(
+            armed > rt.time + 9.0,
+            "the handler did not re-arm at its own 10 s interval: {armed} at {:.2}",
+            rt.time
+        );
+        // The slot's whole-AI deadline (`ai + 0x190`) is the earliest armed clock: the second pass
+        // waits for it, at most now + 5000.
+        assert!(rt.ai_next_due[&1] <= rt.time + 5.0);
+    }
+
+    /// `sithAI_Process` (`0x4e9e20`) skips the whole slot on the `0x3000` family: the shipped
+    /// scripts' `0x2000` sleep switch and the `0x1000` one-shot latch `sithAI_Create` seeds, which
+    /// only the awareness sweep's event 2 clears.
+    #[test]
+    fn the_scheduler_skips_the_0x3000_family() {
+        let mut rt = door_runtime();
+        let mut actor = rt.things[0].clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        let mut player = rt.things[0].clone();
+        player.pos = [-9.0, 0.0, 0.0];
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "barkeep".into()];
+        rt.types = vec![10, 2];
+        rt.template_max_health.insert("barkeep".into(), 100.0);
+        rt.template_soundclass.insert("barkeep".into(), "pednarsh.snd".into());
+        rt.sound_classes.insert(
+            "pednarsh.snd".into(),
+            std::collections::BTreeMap::from([(
+                "happy".to_string(),
+                vec![("happy1.wav".to_string(), 0.8)],
+            )]),
+        );
+        rt.ai.insert(
+            1,
+            crate::ai::parse("alignment=-1.0, rank=0.5, fov=90, sightdist=2.0\n\nTalk 100.0, 1.0\n"),
+        );
+        rt.ai_flags.insert(1, 0x1004);
+        for _ in 0..20 {
+            rt.time += 1.0 / 30.0;
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        assert!(rt.sounds.is_empty(), "a latched (0x1000) actor ran an instinct");
+        assert!(!rt.ai_inst.contains_key(&1), "a latched actor got scheduler slots");
+        // Event 2 clears the latch and the next pass runs.
+        rt.sector_adjoins = vec![Vec::new(); 8];
+        rt.transmit_awareness(7, 0, [0.0, 0.0, 0.0], 3.0, None);
+        assert_eq!(rt.ai_flags.get(&1).copied().unwrap_or(0) & 0x1000, 0);
+        rt.ai_tick(0, 1.0 / 30.0);
+        assert!(
+            rt.ai_inst.contains_key(&1),
+            "the woken actor never got a scheduler pass"
+        );
+    }
+
+    /// The registry's mask rule (`sithAICmd_Startup` @ `0x5091b0`): an event wakes exactly the
+    /// instincts whose mask carries the event bit, and the 0x100 mode-change cascade tells the
+    /// actor's own cogs (`ThingSendMessageEx(thing, 0, 0x18, 256.0)` → the `aievent` message).
+    #[test]
+    fn the_event_masks_wake_exactly_the_registry_instincts_and_cascade_the_mode_change() {
+        // Every registered word, straight off the startup table.
+        for (name, accept, reject, mask) in [
+            ("listen", 0u32, 0u32, 0x7u32),
+            ("lookfortarget", 0x204, 0, 0),
+            ("primaryfire", 2, 0, 0x100),
+            ("follow", 2, 0x800, 0xe00),
+            ("turretfire", 2, 0x800, 0x100),
+            ("opendoors", 2, 0, 0),
+            ("jump", 0, 0, 0x604),
+            ("randomturn", 4, 0, 0),
+            ("roam", 4, 0, 0),
+            ("flee", 0x800, 0, 0xf05),
+            ("sensedanger", 4, 0x800, 0x7),
+            ("hitandrun", 0xc00, 0, 0),
+            ("retreat", 2, 0x800, 0),
+            ("circlestrafe", 2, 0x800, 0),
+            ("blindfire", 2, 0xc00, 0),
+            ("returnhome", 0, 0, 0x900),
+            ("lobfire", 2, 0, 0x100),
+            ("talk", 0xffff, 0, 0),
+            ("crouch", 2, 0, 0x100),
+            ("withdraw", 0x800, 0, 0xf05),
+            ("dodge", 0, 0, 0x1003),
+        ] {
+            assert_eq!(Runtime::instinct_registry(name), (accept, reject, mask), "{name}");
+        }
+        // Event 0x100 reaches lobfire's armed-mode arm and queues the `aievent` cog message.
+        let mut rt = door_runtime();
+        let actor = rt.things[0].clone();
+        rt.things = vec![actor.clone(), actor];
+        rt.templates = vec!["walkplayer".into(), "ryther".into()];
+        rt.types = vec![10, 2];
+        rt.things[1].health = 100.0;
+        rt.ai.insert(
+            1,
+            crate::ai::parse("alignment=-1.0, rank=0.5, fov=180, sightdist=5.0\n\nLobFire 2000.0, 0.8\n"),
+        );
+        rt.thing_links.push((0, 0, 1));
+        rt.ai_flags.insert(1, 0x200);
+        let _ = rt.emit_ai_event(1, 0x100, None);
+        assert_eq!(rt.armed_mode.get(&1).copied(), Some(1));
+        assert!(
+            rt.pending_messages
+                .iter()
+                .any(|(instance, label, params, ..)| *instance == 0
+                    && *label == "aievent"
+                    && params[0] == 256.0),
+            "the 0x100 event did not tell the actor's cogs"
+        );
+    }
+
     /// `SetThingLook` aims a thing along a direction (`sithPhysics_SetThingLook`, `0x4f5a80`) and
     /// sets the jkFlag `0x100`; a zero blend snaps, a positive one turns part of the way.
     #[test]
@@ -11942,6 +12213,22 @@ mod tests {
         // Unlisted bins keep whatever the script wrote (the port's modelling, not the engine's table).
         rt.call("changeinv", &[Value::Num(1.0), Value::Num(14.0), Value::Num(300.0)]);
         assert_eq!(rt.inv.get(&14).copied(), Some(300.0));
+    }
+
+
+    /// The `lookfortarget` instinct's scheduler clock (`ai_inst` slot), the value the retired
+    /// `ai_scan` map used to hold.
+    fn scan_clock(rt: &Runtime, index: usize) -> f32 {
+        rt.ai
+            .get(&index)
+            .and_then(|class| {
+                class
+                    .instincts
+                    .iter()
+                    .position(|i| i.name.eq_ignore_ascii_case("LookForTarget"))
+            })
+            .and_then(|slot| rt.ai_inst.get(&index).and_then(|v| v.get(slot).copied()))
+            .unwrap_or(f32::NAN)
     }
 
     fn door_runtime() -> Runtime {
@@ -12642,6 +12929,15 @@ mod tests {
         rt.things.push(watcher);
         rt.templates.push("reeyeesgun".into());
         rt.types.push(2);
+        // The scheduler needs the class to seed the `lookfortarget` slot from `acquire_ms`.
+        rt.ai.insert(
+            1,
+            crate::ai::parse("alignment=-1.0, rank=0.5, fov=90, sightdist=5.0\n\nLookForTarget 500.0\n"),
+        );
+        rt.ai.insert(
+            2,
+            crate::ai::parse("alignment=-1.0, rank=0.5, fov=90, sightdist=5.0\n\nLookForTarget 500.0\n"),
+        );
         rt.time = 0.4;
         rt.seed_capture_phase(
             811_474_043,
@@ -12657,12 +12953,12 @@ mod tests {
         assert_eq!(rt.ai_flags[&1], 1586);
         assert_eq!(rt.ai_flags[&2], 4);
         assert!((rt.things[1].ai_wait - 0.104).abs() < 1e-6, "first shot {}", rt.things[1].ai_wait);
-        assert!((rt.ai_scan[&1] - 0.75).abs() < 1e-6, "scan at {}", rt.ai_scan[&1]);
+        assert!((scan_clock(&rt, 1) - 0.75).abs() < 1e-6, "scan at {}", scan_clock(&rt, 1));
         assert!((rt.ai_detect_at[&1] - 0.504).abs() < 1e-6);
-        assert!((rt.ai_scan[&2] - 0.729).abs() < 1e-6, "scan at {}", rt.ai_scan[&2]);
+        assert!((scan_clock(&rt, 2) - 0.729).abs() < 1e-6, "scan at {}", scan_clock(&rt, 2));
         assert!((rt.things[2].ai_wait - 5.0).abs() < 1e-6, "an unscheduled shot was invented");
         // The origin clock is the capture's: the offsets are its milliseconds, not a guess.
-        assert!(rt.ai_scan.get(&2).is_some_and(|due| *due > rt.time));
+        assert!(rt.ai_inst.get(&2).is_some_and(|slots| slots.iter().all(|c| *c > rt.time)));
     }
 
     /// `--encounter` telemetry (issue #9): a shot is queued where it leaves the shooter, with the
@@ -13609,6 +13905,8 @@ mod tests {
                  Follow 0.0, 0.5\n",
             ),
         );
+        // `hitandrun`'s registry word is `0xc00` — the scheduler only runs it in that mode.
+        rt.ai_flags.insert(1, 0xc00);
         // It is firing: `last_shot` is what `PrimaryFire` sets and what the handler reads, and it is
         // refreshed each frame of the window.
         for _ in 0..40 {
@@ -13644,6 +13942,7 @@ mod tests {
             ),
         );
         // No `PrimaryFire` in the class, so nothing refreshes the shot: one shot at t = 0.
+        once.ai_flags.insert(1, 0xc00);
         once.last_shot.insert(1, 0.0);
         for _ in 0..40 {
             once.time += 1.0 / 30.0;
@@ -13706,13 +14005,15 @@ mod tests {
             ),
         );
 
+        // `randomturn`'s registry word is 4 (awake).
+        rt.ai_flags.insert(1, 0x4);
         for _ in 0..40 {
             rt.time += 1.0 / 30.0;
             rt.ai_tick(0, 1.0 / 30.0);
         }
         let chosen = rt.ai_randomturn.get(&1).copied().expect("no randomturn state");
         assert!(
-            chosen.1.abs() > 1e-3,
+            chosen.abs() > 1e-3,
             "the actor never picked a direction: {chosen:?}"
         );
         assert!(
@@ -13766,6 +14067,8 @@ mod tests {
         );
         rt.ai_home.insert(1, [0.0, 0.0, 0.0]);
 
+        // `roam`'s registry word is 4 (awake); its handler also refuses while searching (`0x2`).
+        rt.ai_flags.insert(1, 0x4);
         for _ in 0..60 {
             rt.time += 1.0 / 30.0;
             rt.ai_tick(0, 1.0 / 30.0);
@@ -14253,27 +14556,23 @@ mod tests {
             ),
         );
         rt.ai_flags.insert(1, 0x200);
+        // The handler's mask is `0x100`: the armed mode is written from the mode-change event
+        // (`sithAI_EmitEvent`'s 0x100 dispatch), not from a clock. A plain tick changes nothing.
         rt.ai_tick(0, 1.0 / 30.0);
         assert_eq!(
-            rt.armed_mode.get(&1).copied(),
-            Some(1),
-            "an awake actor with `LobFire` did not draw its weapon"
+            rt.armed_mode.get(&1),
+            None,
+            "a plain tick armed the weapon without a mode-change event"
         );
-        // The handler's own 1000 ms interval: the bit clearing does not holster until it expires.
-        rt.ai_flags.insert(1, 0);
-        for _ in 0..20 {
-            rt.time += 1.0 / 30.0;
-            rt.ai_tick(0, 1.0 / 30.0);
-        }
+        let _ = rt.emit_ai_event(1, 0x100, None);
         assert_eq!(
             rt.armed_mode.get(&1).copied(),
             Some(1),
-            "the armed mode changed before the 1000 ms interval"
+            "an awake actor with `LobFire` did not draw its weapon on the 0x100 event"
         );
-        for _ in 0..20 {
-            rt.time += 1.0 / 30.0;
-            rt.ai_tick(0, 1.0 / 30.0);
-        }
+        // The same branch holsters when the awake bit is clear.
+        rt.ai_flags.insert(1, 0);
+        let _ = rt.emit_ai_event(1, 0x100, None);
         assert_eq!(
             rt.armed_mode.get(&1).copied(),
             Some(0),
@@ -16467,6 +16766,8 @@ mod tests {
             ),
         );
 
+        // `circlestrafe`'s registry word is 2 (searching), reject 0x800.
+        rt.ai_flags.insert(1, 0x2);
         for _ in 0..30 {
             rt.ai_tick(0, 1.0 / 30.0);
         }
@@ -16495,8 +16796,8 @@ mod tests {
             rt.ai_tick(0, 1.0 / 30.0);
         }
         assert_ne!(
-            rt.ai_strafe_goal.get(&1).map(|(_, goal)| *goal),
-            Some(held.1),
+            rt.ai_strafe_goal.get(&1).copied(),
+            Some(held),
             "the ring point never moved after the interval expired"
         );
 
@@ -16596,6 +16897,8 @@ mod tests {
             ),
         );
 
+        // `retreat`'s registry word is 2 (searching), reject 0x800.
+        rt.ai_flags.insert(1, 0x2);
         rt.ai_tick(0, 1.0 / 30.0);
         assert!(
             rt.ai_withdraw.contains_key(&1),
@@ -17584,7 +17887,7 @@ mod tests {
         // would not hear an actor's activate.
         rt.link_masks.insert((THING_SOURCE, 0, 3, 2), 0x405);
         // `FUN_0050abc0` runs the activate only while the AI flag word's bit `0x1` (moved) is set.
-        rt.ai_flags.insert(1, 0x1);
+        rt.ai_flags.insert(1, 0x3); // opendoors: accept 2, the handler itself needs the moving bit 1
 
         rt.ai_tick(0, 0.1);
         assert!(
@@ -17598,7 +17901,7 @@ mod tests {
         // The handler writes `now + 1000 ms` into its own state (`0x50abc0`), so a moving actor does
         // not message the same door again inside that window.
         rt.pending_messages.clear();
-        rt.ai_flags.insert(1, 0x1);
+        rt.ai_flags.insert(1, 0x3);
         rt.time = 0.5;
         rt.ai_tick(0, 0.1);
         assert!(
@@ -17606,7 +17909,7 @@ mod tests {
             "the handler ran again inside its 1000 ms re-arm: {:?}",
             rt.pending_messages
         );
-        rt.ai_flags.insert(1, 0x1);
+        rt.ai_flags.insert(1, 0x3);
         rt.time = 1.01;
         rt.ai_tick(0, 0.1);
         assert!(
@@ -17634,7 +17937,7 @@ mod tests {
             crate::ai::parse("alignment=-1.0, rank=0.5, fov=180\n\nOpenDoors\n"),
         );
         far.thing_links.push((0, 3, 2));
-        far.ai_flags.insert(1, 0x1);
+        far.ai_flags.insert(1, 0x3);
         far.ai_tick(0, 0.1);
         assert!(
             far.pending_messages.is_empty(),
@@ -17656,7 +17959,7 @@ mod tests {
         quiet.types = vec![10, 2, 0];
         quiet.ai.insert(1, crate::ai::parse("alignment=-1.0, rank=0.5, fov=180\n\nLookForTarget 500.0\n"));
         quiet.thing_links.push((0, 3, 2));
-        quiet.ai_flags.insert(1, 0x1);
+        quiet.ai_flags.insert(1, 0x3);
         quiet.ai_tick(0, 0.1);
         assert!(
             quiet.pending_messages.is_empty(),
@@ -17690,10 +17993,11 @@ mod tests {
             ),
         );
 
-        // The scan runs only while the AI's awake bit is set (`FUN_0050aa80`'s branch A); a class
-        // launched with `aisetmode(actor, 0x200)` — the shipped wake — is re-woken by branch B on its
-        // first interval, which is what puts `0x4` back.
+        // The scan (branch A) runs only while the awake bit is set and the searching bit is clear:
+        // `FUN_0050aa80` routes a `0x200` word to branch B, the memory-decay wake
+        // (`last_seen + fltArg[1] < now`), which never fires here.
         rt.ai_flags.insert(1, 0x200);
+        assert_eq!(rt.ai_flags.get(&1).copied(), Some(0x200));
         // Facing away: outside the 90-degree cone, so the scan must not find the body even though the
         // range (2.0) is well inside `sightdist` (5.0).
         rt.ai_tick(0, 0.1);
@@ -17707,7 +18011,11 @@ mod tests {
         // certain and keeps this a test of the cone, not of the random draw.
         rt.things[0].flags = 0x4;
         rt.things[1].yaw = 90.0;
-        rt.ai_scan.clear();
+        rt.ai_flags.insert(1, 0x4); // branch A: awake, not searching
+        rt.ai_next_due.remove(&1);
+        if let Some(slots) = rt.ai_inst.get_mut(&1) {
+            slots.iter_mut().for_each(|clock| *clock = 0.0);
+        }
         rt.ai_last_seen.clear();
         rt.ai_tick(0, 0.1);
         assert!(
@@ -17795,7 +18103,7 @@ mod tests {
         let ai = rt.ai[&1].clone();
         // The plain range test the scan used to apply refuses this body...
         assert!(!ai.sees([0.0, 0.0, 0.575], 0.0, [0.0, 5.05, 0.5]), "sanity: centre is out of range");
-        rt.ai_flags.insert(1, 0x204);
+        rt.ai_flags.insert(1, 0x4); // branch A: awake, searching bit clear (0x200 routes to branch B)
         rt.ai_last_seen.clear();
         rt.ai_tick(0, 0.1);
         assert!(
@@ -17810,6 +18118,10 @@ mod tests {
     #[test]
     fn a_captured_zero_deadline_is_due_now_and_a_set_one_is_offset_from_the_origin() {
         let mut rt = door_runtime();
+        rt.ai.insert(
+            1,
+            crate::ai::parse("alignment=-1.0, rank=0.5, fov=90, sightdist=5.0\n\nLookForTarget 500.0\n"),
+        );
         rt.time = 4.2;
         rt.templates = vec!["walkplayer".into(), "tuskan".into()];
         rt.types = vec![10, 2];
@@ -17821,7 +18133,7 @@ mod tests {
                 CapturedPhase { flags: 4, fire_ms: 0, acquire_ms: 0, next_pass_ms: 0 },
             )],
         );
-        assert_eq!(rt.ai_scan[&1], 4.2, "a captured 0 scan must be due now");
+        assert_eq!(scan_clock(&rt, 1), 4.2, "a captured 0 scan must be due now");
         assert_eq!(rt.ai_detect_at[&1], 4.2, "a captured 0 pass must be due now");
         // A captured deadline is relative to the capture's own origin.
         rt.seed_capture_phase(
@@ -17832,7 +18144,7 @@ mod tests {
                 CapturedPhase { flags: 4, fire_ms: 0, acquire_ms: 4304, next_pass_ms: 4529 },
             )],
         );
-        assert!((rt.ai_scan[&1] - 4.304).abs() < 1e-4, "the scan waited {:?}", rt.ai_scan[&1]);
+        assert!((scan_clock(&rt, 1) - 4.304).abs() < 1e-4, "the scan waited {}", scan_clock(&rt, 1));
         assert!((rt.ai_detect_at[&1] - 4.529).abs() < 1e-4, "the pass waited {:?}", rt.ai_detect_at[&1]);
     }
 }
