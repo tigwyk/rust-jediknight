@@ -61,6 +61,34 @@ impl World {
     }
 }
 
+/// The player can release the runtime for scripts at a contact. Generic ticks already hold it,
+/// so they queue messages for the existing tick dispatch.
+enum ContactRuntime<'a> {
+    Player { world: &'a World, eye: f32, dispatch: &'a mut dyn FnMut() },
+    Tick(&'a mut Runtime),
+}
+
+impl ContactRuntime<'_> {
+    fn with<T>(&mut self, f: impl FnOnce(&mut Runtime) -> T) -> T {
+        match self {
+            Self::Player { world, .. } => f(&mut world.borrow_mut()),
+            Self::Tick(rt) => f(rt),
+        }
+    }
+
+    fn dispatch(&mut self, state: &mut crate::collide::MoveState) {
+        if let Self::Player { world, eye, dispatch } = self {
+            Runtime::player_move_phase(world, state, *eye, dispatch);
+        }
+    }
+
+    fn position(&self, state: &crate::collide::MoveState) -> [f32; 3] {
+        let mut at = state.pos;
+        if let Self::Player { eye, .. } = self { at[2] += *eye; }
+        at
+    }
+}
+
 thread_local! {
     /// Where this thread took the guard it still holds. The only writer is `take` (to record) and
     /// `Borrow`'s `Drop` (to clear), both on the same thread.
@@ -1646,6 +1674,8 @@ pub struct Runtime {
     /// (`SITH_SURFACE_WATER` 0x20000 / `VERYDEEPWATER` 0x100000) are what halve the player's move;
     /// `SetSurfaceFlags` is not implemented, so the level's own word is the whole answer.
     pub surface_flags: Vec<u32>,
+    /// Last `touched` clock per linked surface (`sithSurface+0x58`, engine milliseconds).
+    surface_touched_ms: BTreeMap<usize, u32>,
     /// Which sector claims each world surface (`SURFACES <first> <count>` per room), `-1` when no room
     /// does. `sithPlayerActions_Activate` searches the **body's own sector** for a switch, so a surface an
     /// adjoining room owns is not reachable from here: the cantina plate is sector 31's, the player stands
@@ -2662,6 +2692,7 @@ impl Runtime {
                 })
                 .collect(),
             surface_flags: level.surfaces.iter().map(|s| s.surfflags).collect(),
+            surface_touched_ms: BTreeMap::new(),
             sounds: Vec::new(),
             sound_loops: Vec::new(),
             timers: 0.0,
@@ -3386,14 +3417,14 @@ impl Runtime {
         // load (`FindFloor(thing, 1)`, the forced reach), so an actor keeps the level's authored
         // height instead of sagging to its sphere contact first. The pass runs once, on the first
         // step that has a collider.
-        let cached_geometry = self.solids.clone();
-        let seat_geometry = geometry.or(cached_geometry.as_deref());
+        let stored_geometry = if geometry.is_none() { self.solids.clone() } else { None };
+        let seat_geometry = geometry.or(stored_geometry.as_deref());
         let mut seated_load = false;
         if !self.seated_load && let Some(solids) = seat_geometry {
             seated_load = true;
             for i in 0..self.things.len() {
                 if Some(i) == player_at
-                    || !matches!(self.types.get(i).copied(), Some(2) | Some(3))
+                    || !matches!(self.types.get(i).copied(), Some(2 | 3))
                     || self.things[i].phys_flags & 0x1 == 0
                     || self.mass.get(&i).copied().unwrap_or(0.0) == 0.0
                     || self.things[i].attach.is_some()
@@ -3435,82 +3466,11 @@ impl Runtime {
         self.seated_load |= seated_load;
         // A projectile that dies on geometry is a miss in the encounter chronology.
         let mut lost_shots: Vec<usize> = Vec::new();
+        // Resolve in thing order so a later contact cannot overwrite a live target impulse.
         for i in 0..self.things.len() {
-            // Resolve the body's hold and floor search before its path or rotation advances.
-            let seat = (|| {
-                    if Some(i) == player_at
-                        || !matches!(self.types.get(i).copied(), Some(2) | Some(3))
-                        || self.things[i].phys_flags & 0x1 == 0
-                        || self.mass.get(&i).copied().unwrap_or(0.0) == 0.0
-                        || self.things[i].attach.is_some()
-                        || self.things[i].destroyed
-                    {
-                        return None;
-                    }
-                    let solids = seat_geometry?;
-                    let t = &self.things[i];
-                    let radius = body_radius[i];
-                    let height = self.thing_height(Some(i), radius);
-                    let sector = usize::try_from(t.sector)
-                        .ok()
-                        .filter(|sector| *sector < solids.sectors.len())
-                        .or_else(|| solids.sector_at(t.pos, 0.1))?;
-                    let pos = t.pos;
-                    let mut vel = t.vel;
-                    let previous = t.floor_attach;
-                    // `sithPhysics_UpdateThingPhysics`'s thrust arm (`0x4f6270`): `thrust * dt`
-                    // joins the velocity before the move, and a body whose physflags carry
-                    // `0x400000` (`_powerup`) is exempt — which is why m5's weapon pickups stay
-                    // put in a sector a script gives an updraft.
-                    if t.phys_flags & 0x400000 == 0
-                        && let Some(drive) = thrust.get(sector).copied()
-                        && drive != [0.0; 3]
-                    {
-                        for k in 0..3 {
-                            vel[k] += drive[k] * dt;
-                        }
-                    }
-                    let mut state = crate::collide::MoveState {
-                        pos, sector, vel, remainder: [0.0; 3], phys_flags: t.phys_flags,
-                        kind: self.types[i] as u32, move_type: 1,
-                        collide: self.template_collide.get(&self.templates[i]).copied().unwrap_or(1),
-                        flags: t.flags, attach_flags: t.attach_flags, attach: previous,
-                        owner: t.owner, water_surface: None,
-                    };
-                    if let Some(attach) = previous.filter(|a| a.thing.is_some()) {
-                        if let Some((attach, carry)) = self.floor_rider_motion(solids, attach, pos, Some(t.attach_offset)) {
-                            state.attach = Some(attach);
-                            if state.attach_flags & 8 == 0 && carry != [0.0; 3] {
-                                Self::move_floor_body(solids, &mut state, carry, radius, self.gates(), 0x40);
-                            }
-                        } else {
-                            state.attach = None;
-                            state.attach_flags = 0;
-                            self.floor_transition(&mut state, previous, Some(i), false);
-                        }
-                    }
-                    let previous = state.attach;
-                    let gravity = if state.phys_flags & 0x40000 != 0 { self.gravity * 0.5 } else { self.gravity };
-                    let mut delta = crate::collide::Solids::update_thing_physics(&mut state, dt, radius, height, gravity);
-                    if let Some(surface) = state.attach.and_then(|a| a.surface) {
-                        let scroll = self.surface_scroll(surface);
-                        for axis in 0..3 { delta[axis] += scroll[axis] * dt; }
-                    }
-                    let recheck = delta == [0.0; 3] && state.attach_flags & 8 == 0
-                        && state.attach.and_then(|a| a.thing).is_some_and(|t| self.floor_parent_move(t.thing) == 2);
-                    if recheck || Self::move_floor_body(solids, &mut state, delta, radius, self.gates(), 0) {
-                        solids.find_floor_for(&mut state, radius, height, self.gates(), false, Some(i), self.thing_up(i));
-                        self.floor_transition(&mut state, previous, Some(i), false);
-                    }
-                    let flat = (state.pos[0] - pos[0]).hypot(state.pos[1] - pos[1]);
-                    let crossed = state.sector != sector;
-                    let anchor = state.attach.and_then(|a| a.thing)
-                        .and_then(|target| self.floor_local_anchor(target.thing, state.pos));
-                    if std::env::var_os("BK_SEAT_TRACE").is_some() {
-                        eprintln!("seat: thing {i} z {:.4} vz {:.4} attach {}", state.pos[2], state.vel[2], state.attach.is_some());
-                    }
-                    Some((state, flat, crossed, anchor))
-            })();
+            let seat = if Some(i) == player_at { None } else {
+                seat_geometry.and_then(|solids| self.move_gravity_body(solids, i, dt, body_radius[i], &thrust))
+            };
             let t = &mut self.things[i];
             if Some(i) == player_at {
                 // Path moves still run — a script can walk the player along frames — but the body's
@@ -3522,9 +3482,7 @@ impl Runtime {
                 }
                 continue;
             }
-            // A gravity body's whole tick came through the seat above (`step_body`: the swept
-            // move, the hold, the FindFloor tail); apply it and keep only the path/rotation
-            // half of the generic loop here.
+            // MoveThing already ran the body's sweep and FindFloor tail.
             if let Some((state, flat, crossed, anchor)) = seat {
                 let attach_flipped = t.floor_attach.is_some() != state.attach.is_some();
                 let fell = (state.pos[2] - t.pos[2]).abs() > 1e-9;
@@ -4375,6 +4333,22 @@ impl Runtime {
     /// volume is the sound's base, and `play_requested_sounds` still owns the fade and the rear pan.
     fn queue_mode_sound_at(&mut self, index: usize, mode: &str, at: [f32; 3], volume: f32) {
         let Some(wav) = self.chatter_wav(index, mode) else { return };
+        self.queue_sound_class_entry(index, wav, at, volume, "sithSoundClass_PlayModeRandom (0x4e6b70)");
+    }
+
+    /// `sithSoundClass_PlayModeFirstEx` (`0x4e6af0`): the head entry, without drawing RNG.
+    fn queue_first_mode_sound(&mut self, index: usize, mode: &str, at: [f32; 3], volume: f32) {
+        let Some(wav) = self.templates.get(index)
+            .and_then(|name| self.template_soundclass.get(&name.to_ascii_lowercase()))
+            .and_then(|class| self.sound_classes.get(class))
+            .and_then(|modes| modes.get(mode))
+            .and_then(|rows| rows.first())
+            .map(|(wav, _)| wav.clone())
+        else { return };
+        self.queue_sound_class_entry(index, wav, at, volume, "sithSoundClass_PlayModeFirstEx (0x4e6af0)");
+    }
+
+    fn queue_sound_class_entry(&mut self, index: usize, wav: String, at: [f32; 3], volume: f32, source: &'static str) {
         // `sithSoundMixer_PlaySoundThing` (`0x4dba60`) ends with
         // `CreateTransmittingEvent(sector, pos, 0, volume * _DAT_00522f80, thing)`: a sound played on a
         // thing is a **kind-0** awareness event at `volume * 0.6` (the constant read out of the EXE's
@@ -4397,7 +4371,7 @@ impl Runtime {
             pos: Some(at),
             channel,
             pitch: 1.0,
-            source: "sithSoundClass_PlayModeRandom (0x4e6b70) -> sithSoundMixer_PlaySoundThing (0x4dba60)",
+            source,
         });
     }
     /// `dodge`'s damage path (`0x50b360`, event 1): an actor whose class carries the instinct and is
@@ -7093,6 +7067,12 @@ impl Runtime {
                     |state| solids.inside_sector_with_gates(state.sector, state.pos, 0.0, world.borrow().gates()),
                     |_| {},
                     |state, item| Self::sith_item_player_touch(world, solids, state, body.eye, item, &mut *dispatch.borrow_mut()),
+                    |state, hit, crease| {
+                        let mut dispatch = dispatch.borrow_mut();
+                        let mover = world.borrow().local_player();
+                        let mut rt = ContactRuntime::Player { world, eye: body.eye, dispatch: &mut *dispatch };
+                        Self::solid_contact(solids, &mut rt, mover, state, hit, crease)
+                    },
                 );
             } else {
                 Self::player_detach_floor(world, &mut state, body.eye, &mut *dispatch.borrow_mut());
@@ -7105,9 +7085,6 @@ impl Runtime {
             body.grounded = false;
         }
         let gravity = body.gravity;
-        // The fall impact is measured before this frame's sector thrust, which is what the old
-        // walker did when it read `player.vy` before committing the thrust-scaled local.
-        let impact_vy = body.vy;
         state.vel[0] += thrust[0] * dt;
         state.vel[1] += thrust[1] * dt;
         state.vel[2] += thrust[2] * dt;
@@ -7177,6 +7154,7 @@ impl Runtime {
                 &mut state, delta, radius, 0,
                 |state, dir, distance, radius, flags, search| {
                     let rt = world.borrow();
+                    if let Some(index) = rt.local_player() { search.exclude_thing(index); }
                     solids.search_for_collisions(
                         state.sector, Some(state), state.pos, dir, distance, radius,
                         Gates { sectors: &rt.sector_flags, adjoins: &rt.adjoin_flags },
@@ -7196,6 +7174,12 @@ impl Runtime {
                 |_| { find_floor = true; },
                 |state, item| {
                     Self::sith_item_player_touch(world, solids, state, body.eye, item, &mut *dispatch.borrow_mut());
+                },
+                |state, hit, crease| {
+                    let mut dispatch = dispatch.borrow_mut();
+                    let mover = world.borrow().local_player();
+                    let mut rt = ContactRuntime::Player { world, eye: body.eye, dispatch: &mut *dispatch };
+                    Self::solid_contact(solids, &mut rt, mover, state, hit, crease)
                 },
             );
             let step_landed = find_floor
@@ -7236,18 +7220,6 @@ impl Runtime {
         // Surface carry joins the displacement, not the relative physics velocity (0x4cc4c0:33-38).
         body.vel = [step_vel[0] - thrust[0] * dt, step_vel[1] - thrust[1] * dt];
         vy = step_vel[2];
-        // Landing damage wants the engine's velocity units, not this world's gravity-scaled fall.
-        let engine_impact = -impact_vy / crate::physics_scale().max(1.0).sqrt();
-        if landed && engine_impact > 2.5 {
-            let damage = crate::fall_damage(engine_impact);
-            if damage > 0.0 {
-                println!(
-                    "fall: landed at {:.1} u/s ({engine_impact:.1} in engine units), {damage:.0} damage",
-                    -body.vy
-                );
-                world.borrow_mut().hurt_player_fall(damage);
-            }
-        }
         body.vy = vy;
         body.sector = sector;
         body.pos = Vec3::from(pos);
@@ -7273,7 +7245,7 @@ impl Runtime {
             if body.fall_fade <= 0.0 {
                 body.fall_killed = false;
                 body.fall_fade = 1.0;
-                world.borrow_mut().hurt_player_fall(1000.0);
+                world.borrow_mut().hurt_player_fall(1000.0, 0);
             }
         }
         // Water halves movement: the engine reads the surface under the feet (`SITH_SURFACE_WATER`
@@ -7332,6 +7304,314 @@ impl Runtime {
             phys_flags: thing.map_or(0x4a4f, |t| t.phys_flags),
             flags: thing.map_or(0, |t| t.flags),
             owner: None,
+        }
+    }
+
+    /// The generic gravity tick's `sithPhysics_UpdateThing` -> `sithCollision_MoveThing`.
+    fn move_gravity_body(
+        &mut self, solids: &crate::collide::Solids, index: usize, dt: f32,
+        radius: f32, thrust: &[[f32; 3]],
+    ) -> Option<(crate::collide::MoveState, f32, bool, Option<[f32; 3]>)> {
+        let t = &self.things[index];
+        let kind = self.types.get(index).copied()? as u32;
+        let name = self.templates.get(index)?;
+        if !matches!(kind, 2..=4) || t.phys_flags & 1 == 0 || t.destroyed || t.attach.is_some()
+            || self.mass.get(&index).copied().unwrap_or(0.0) == 0.0
+            || self.template_move.get(name).is_some_and(|m| m != "physics")
+        {
+            return None;
+        }
+        let sector = usize::try_from(t.sector).ok().filter(|s| *s < solids.sectors.len())
+            .or_else(|| solids.sector_at(t.pos, 0.1))?;
+        let start = t.pos;
+        let height = self.thing_height(Some(index), radius);
+        let gravity = if t.phys_flags & 0x40000 != 0 { self.gravity * 0.5 } else { self.gravity };
+        let mut state = crate::collide::MoveState {
+            pos: start, sector, vel: t.vel, remainder: [0.0; 3], phys_flags: t.phys_flags,
+            kind, move_type: 1, collide: self.template_collide.get(name).copied().unwrap_or(1),
+            flags: t.flags, attach: t.floor_attach, attach_flags: t.attach_flags, owner: t.owner,
+            water_surface: None,
+        };
+        // `sithPhysics_UpdateThingPhysics` (`0x4f6270`): the sector drive joins velocity before
+        // the move, except under physflag 0x400000.
+        if t.phys_flags & 0x400000 == 0 && let Some(drive) = thrust.get(sector) {
+            for (v, drive) in state.vel.iter_mut().zip(drive) { *v += drive * dt; }
+        }
+        let previous = state.attach;
+        let mut carry = [0.0; 3];
+        if let Some(attach) = previous.filter(|a| a.thing.is_some()) {
+            if let Some((attach, displacement)) = self.floor_rider_motion(solids, attach, start, Some(t.attach_offset)) {
+                state.attach = Some(attach);
+                if state.attach_flags & 8 == 0 { carry = displacement; }
+            } else {
+                state.attach = None;
+                state.attach_flags = 0;
+                self.floor_transition(&mut state, previous, Some(index), false);
+            }
+        }
+        if carry != [0.0; 3] {
+            self.move_gravity_body_sweep(solids, index, &mut state, carry, radius, height, 0x40);
+        }
+        let mut delta = crate::collide::Solids::update_thing_physics(&mut state, dt, radius, height, gravity);
+        if let Some(surface) = state.attach.and_then(|a| a.surface) {
+            let scroll = self.surface_scroll(surface);
+            for axis in 0..3 { delta[axis] += scroll[axis] * dt; }
+        }
+        if delta == [0.0; 3] && state.attach_flags & 8 == 0
+            && state.attach.and_then(|a| a.thing).is_some_and(|t| self.floor_parent_move(t.thing) == 2)
+        {
+            self.update_floor_attach(solids, index, &mut state, radius, height);
+        } else {
+            self.move_gravity_body_sweep(solids, index, &mut state, delta, radius, height, 0);
+        }
+        if std::env::var_os("BK_SEAT_TRACE").is_some() {
+            eprintln!("seat: thing {index} z {:.4} vz {:.4} attach {}", state.pos[2], state.vel[2], state.attach.is_some());
+        }
+        let flat = (state.pos[0] - start[0]).hypot(state.pos[1] - start[1]);
+        let crossed = state.sector != sector;
+        let anchor = state.attach.and_then(|a| a.thing)
+            .and_then(|target| self.floor_local_anchor(target.thing, state.pos));
+        Some((state, flat, crossed, anchor))
+    }
+
+    fn move_gravity_body_sweep(
+        &mut self, solids: &crate::collide::Solids, index: usize, state: &mut crate::collide::MoveState,
+        delta: [f32; 3], radius: f32, height: f32, flags: u32,
+    ) {
+        let rt = std::cell::RefCell::new(self);
+        solids.move_thing_with(
+            state, delta, radius, flags,
+            |state, dir, distance, radius, flags, search| {
+                search.exclude_thing(index);
+                solids.search_for_collisions(
+                    state.sector, Some(state), state.pos, dir, distance, radius, rt.borrow().gates(), flags, search,
+                );
+            },
+            |state, _, far| {
+                if state.sector != far && rt.borrow().sector_flags.get(far).is_some_and(|f| f & crate::collide::SECTOR_UNDERWATER != 0) {
+                    state.vel[2] *= 0.25; // `sithThing_EnterWater` (0x4cd370, 0x522e8c).
+                }
+                state.sector = far;
+            },
+            |state| solids.inside_sector_with_gates(state.sector, state.pos, 0.0, rt.borrow().gates()),
+            |state| rt.borrow_mut().update_floor_attach(solids, index, state, radius, height),
+            |_, _| {},
+            |state, hit, crease| {
+                // Specialized weapon surface/thing callbacks retain their earlier scope.
+                if state.kind == 3 { return solids.probe_contact(state, hit, crease); }
+                Self::solid_contact(solids, &mut ContactRuntime::Tick(&mut rt.borrow_mut()), Some(index), state, hit, crease)
+            },
+        );
+    }
+
+    fn update_floor_attach(
+        &mut self, solids: &crate::collide::Solids, index: usize, state: &mut crate::collide::MoveState,
+        radius: f32, height: f32,
+    ) {
+        let previous = state.attach;
+        solids.find_floor_for(state, radius, height, self.gates(), false, Some(index), self.thing_up(index));
+        self.floor_transition(state, previous, Some(index), false);
+    }
+
+    fn solid_contact(
+        solids: &crate::collide::Solids, rt: &mut ContactRuntime<'_>, mover: Option<usize>,
+        state: &mut crate::collide::MoveState, hit: crate::collide::Sweep, crease: &mut Option<[f32; 3]>,
+    ) -> bool {
+        if let Some(target) = hit.thing {
+            // Weapon pairs have dedicated handlers; preserve the generic gravity sweep's stop.
+            if state.kind == 3 || rt.with(|rt| rt.types.get(target.thing) == Some(&3)) {
+                return solids.probe_contact(state, hit, crease);
+            }
+            Self::thing_collision_handler(rt, mover, state, hit, target.thing, crease)
+        } else {
+            Self::handle_thing_hit_surface(rt, mover, state, hit, crease)
+        }
+    }
+
+    /// `sithCollision_HandleThingHitSurface` (`0x4e8b40`): respond first, then `touched`, then
+    /// the impact sound. Suppress the inline charge only when the surface's 0x80 bit is set.
+    fn handle_thing_hit_surface(
+        rt: &mut ContactRuntime<'_>, mover: Option<usize>, state: &mut crate::collide::MoveState,
+        hit: crate::collide::Sweep, crease: &mut Option<[f32; 3]>,
+    ) -> bool {
+        if state.move_type != 1 { return false; }
+        let [x, y, z] = hit.normal;
+        let speed = -(state.vel[0] * x + state.vel[2] * z + state.vel[1] * y);
+        let flags = rt.with(|rt| rt.surface_flags.get(hit.surface).copied().unwrap_or(0));
+        if !crate::collide::Solids::collide_hurt(state, hit.normal, hit.distance, crease, flags & 0x80 != 0, |state, damage| {
+            Self::charge_contact(rt, mover, state, damage);
+        }) {
+            return false;
+        }
+        if flags & SITH_SURFACE_COG_LINKED != 0 && state.flags & 0x100 == 0 {
+            let sent = rt.with(|rt| {
+                let now = (rt.time * 1000.0) as u32;
+                let last = rt.surface_touched_ms.entry(hit.surface).or_default();
+                if last.wrapping_add(500) <= now {
+                    *last = now;
+                    rt.sith_cog_surface_send_message(hit.surface, mover, "touched") != 0
+                } else {
+                    false
+                }
+            });
+            if sent { rt.dispatch(state); }
+        }
+        let metal = rt.with(|rt| rt.surface_flags.get(hit.surface).is_some_and(|f| f & 0x10000 != 0));
+        Self::contact_impact_sound(rt, mover, state, speed, metal);
+        true
+    }
+
+    /// `sithCollision_ThingCollisionHandler` (`0x4e8c50`), in mover/hit order. The pair table's
+    /// swapped entries swap the callback arguments back before running this response.
+    fn thing_collision_handler(
+        rt: &mut ContactRuntime<'_>, mover: Option<usize>, state: &mut crate::collide::MoveState,
+        hit: crate::collide::Sweep, target: usize, crease: &mut Option<[f32; 3]>,
+    ) -> bool {
+        if let Some(mover) = mover && state.flags & 0x100 == 0 {
+            if state.flags & 0x400 != 0 {
+                let sent = rt.with(|rt| rt.sith_cog_thing_send_message(mover, Some(target), "touched"));
+                if sent != 0 { rt.dispatch(state); }
+            }
+            let sent = rt.with(|rt| {
+                if rt.things.get(target).is_some_and(|t| t.flags & 0x400 != 0) {
+                    rt.sith_cog_thing_send_message(target, Some(mover), "touched")
+                } else { 0 }
+            });
+            if sent != 0 { rt.dispatch(state); }
+        }
+
+        let (mover_mass, target_mass, target_vel, target_phys, target_flags, target_kind) = rt.with(|rt| {
+            let mover_mass = mover.map_or(1.0, |i| rt.mass.get(&i).copied().unwrap_or(0.0));
+            let physics = rt.templates.get(target)
+                .is_some_and(|n| rt.template_move.get(n).is_some_and(|m| m == "physics"));
+            let target_mass = if physics { rt.mass.get(&target).copied().unwrap_or(0.0) } else { 0.0 };
+            let (vel, phys, flags) = rt.things.get(target).map_or(([0.0; 3], 0, 0), |t| (t.vel, t.phys_flags, t.flags));
+            (mover_mass, target_mass, vel, phys, flags, rt.types.get(target).copied())
+        });
+        // Path movers still use the separate path update, not this MoveThing sweep.
+        if state.move_type != 1 || mover_mass == 0.0 { return true; }
+        let [x, y, z] = hit.normal;
+        let speed = -(state.vel[0] * x + state.vel[1] * y + state.vel[2] * z);
+        if target_mass != 0.0 {
+            let mut relative = speed + target_vel[0] * x + target_vel[1] * y + target_vel[2] * z;
+            if relative.abs() <= 1e-5 || relative <= 0.0 { return false; }
+            // `0x523024` scales once for each body without the bounce flag.
+            if state.phys_flags & 0x20 == 0 { relative *= 0.5; }
+            if target_phys & 0x20 == 0 { relative *= 0.5; }
+            let product = mover_mass * target_mass;
+            let ratio = (product + product) / (mover_mass + target_mass);
+            let force = hit.normal.map(|n| relative * n * ratio);
+            rt.with(|rt| {
+                Self::sith_physics_apply_force(mover_mass, force, &mut state.vel, &mut state.phys_flags, |vel| {
+                    let parent = state.attach.and_then(|a| a.thing).map(|hit| hit.thing)
+                        .or_else(|| mover.and_then(|i| rt.things[i].attach));
+                    rt.detach_support(mover, state.attach.and_then(|a| a.surface), parent, state.flags, Some(vel));
+                    state.attach = None;
+                    state.attach_flags = 0;
+                    if let Some(mover) = mover {
+                        rt.things[mover].attach = None;
+                        rt.things[mover].floor_attach = None;
+                        rt.things[mover].attach_flags = 0;
+                    }
+                });
+                // The force acts on the live target before CollideHurt reads the mover's velocity.
+                let mut vel = target_vel;
+                let mut phys = target_phys;
+                Self::sith_physics_apply_force(target_mass, force.map(|f| -f), &mut vel, &mut phys, |vel| {
+                    let t = &rt.things[target];
+                    let surface = t.floor_attach.and_then(|a| a.surface);
+                    let parent = t.floor_attach.and_then(|a| a.thing).map(|hit| hit.thing).or(t.attach);
+                    let flags = t.flags;
+                    rt.detach_support(Some(target), surface, parent, flags, Some(vel));
+                    let t = &mut rt.things[target];
+                    t.floor_attach = None;
+                    t.attach = None;
+                    t.attach_flags = 0;
+                });
+                rt.things[target].vel = vel;
+                rt.things[target].phys_flags = phys;
+            });
+        }
+        let accepted = crate::collide::Solids::collide_hurt(state, hit.normal, hit.distance, crease, false, |state, damage| {
+            Self::charge_contact(rt, mover, state, damage);
+        });
+        if accepted {
+            if target_mass == 0.0 {
+                Self::contact_impact_sound(rt, mover, state, speed, target_flags & 0x400000 != 0);
+            }
+            // Actor pairs wrap this handler (`0x4ed210`) and emit AI event 4 on acceptance.
+            rt.with(|rt| {
+                if state.kind == 2 && let Some(mover) = mover {
+                    rt.emit_ai_event(mover, 4, Some(target));
+                }
+                if target_kind == Some(2) { rt.emit_ai_event(target, 4, mover); }
+            });
+        }
+        accepted
+    }
+
+    /// `sithPhysics_ApplyForce` (`0x4f59b0`) for the physics bodies admitted by the pair handler.
+    fn sith_physics_apply_force(
+        mass: f32, force: [f32; 3], vel: &mut [f32; 3], flags: &mut u32, detach: impl FnOnce(&mut [f32; 3]),
+    ) {
+        if mass <= 0.0 { return; } // 0x523180
+        let inverse = 1.0 / mass; // 0x523194
+        if force[2] * inverse > 0.5 { detach(vel); } // 0x523198
+        for (v, f) in vel.iter_mut().zip(force) { *v += f * inverse; }
+        *flags |= 0x8000;
+    }
+
+    /// `sithThing_DetachThing` (`0x4ce380`): restore support velocity and send `exited`.
+    fn detach_support(
+        &mut self, sender: Option<usize>, surface: Option<usize>, parent: Option<usize>,
+        flags: u32, vel: Option<&mut [f32; 3]>,
+    ) {
+        if let Some(vel) = vel {
+            let carry = if let Some(parent) = parent { self.thing_support_velocity(parent) }
+                else { Vec3::from(surface.map_or([0.0; 3], |id| self.surface_scroll(id))) };
+            *vel = (Vec3::from(*vel) + carry).to_array();
+        }
+        if flags & 0x100 != 0 { return; }
+        if let Some(parent) = parent {
+            if self.things.get(parent).is_some_and(|t| t.flags & 0x400 != 0) {
+                self.sith_cog_thing_send_message(parent, sender, "exited");
+            }
+        } else if let Some(surface) = surface {
+            let surface_flags = self.surface_flags.get(surface).copied().unwrap_or(0);
+            if surface_flags & SITH_SURFACE_COG_LINKED != 0 {
+                self.sith_cog_surface_send_message(surface, sender, "exited");
+            }
+        }
+    }
+
+    fn charge_contact(
+        rt: &mut ContactRuntime<'_>, mover: Option<usize>, state: &mut crate::collide::MoveState, damage: f32,
+    ) {
+        let Some(mover) = mover else { return };
+        let at = rt.position(state);
+        rt.with(|rt| {
+            let thing = &mut rt.things[mover];
+            thing.pos = at;
+            thing.sector = state.sector as i32;
+            thing.vel = state.vel;
+            rt.queue_mode_sound(mover, "hitdamaged", at); // `0x35`, table `0x54b40c`
+            if state.kind == 10 {
+                rt.hurt_player_fall(damage, mover as i64);
+            } else if state.kind == 2 {
+                rt.damage_typed_from(mover as i64, damage, 0x40, mover as i64);
+            }
+        });
+        rt.dispatch(state);
+    }
+
+    fn contact_impact_sound(
+        rt: &mut ContactRuntime<'_>, mover: Option<usize>, state: &crate::collide::MoveState, speed: f32, metal: bool,
+    ) {
+        if speed > 0.15 && let Some(mover) = mover { // 0x523020
+            // `0x2e`/`0x2f`, table `0x54b40c`; 0x523014 caps the gain.
+            let mode = if metal { "hitmetal" } else { "hithard" };
+            let at = rt.position(state);
+            rt.with(|rt| rt.queue_first_mode_sound(mover, mode, at, speed.min(1.0)));
         }
     }
 
@@ -7545,7 +7825,14 @@ impl Runtime {
     fn thing_height(&self, index: Option<usize>, radius: f32) -> f32 {
         let name = index.and_then(|i| self.templates.get(i)).map_or("walkplayer", String::as_str);
         let insert = index.map_or_else(|| template_insert(name)[2], |i| self.things[i].insert[2]);
-        crate::collide::get_thing_height(self.template_height.get(name).copied().unwrap_or(0.0), insert, radius)
+        let explicit = self.template_height.get(name).copied().or_else(|| {
+            if name.bytes().any(|b| b.is_ascii_uppercase()) {
+                self.template_height.get(&name.to_ascii_lowercase()).copied()
+            } else {
+                None
+            }
+        });
+        crate::collide::get_thing_height(explicit.unwrap_or(0.0), insert, radius)
     }
 
     fn floor_parent_move(&self, index: usize) -> u32 {
@@ -7581,29 +7868,6 @@ impl Runtime {
         Some((attach, carry))
     }
 
-    fn move_floor_body(
-        solids: &crate::collide::Solids, state: &mut crate::collide::MoveState, delta: [f32; 3],
-        radius: f32, gates: Gates<'_>, flags: u32,
-    ) -> bool {
-        let mut find_floor = false;
-        solids.move_thing_with(
-            state, delta, radius, flags,
-            |state, dir, dist, radius, flags, search| {
-                solids.search_for_collisions(state.sector, Some(state), state.pos, dir, dist, radius, gates, flags, search);
-            },
-            |state, _, far| {
-                if state.sector != far && gates.sectors.get(far).is_some_and(|f| f & crate::collide::SECTOR_UNDERWATER != 0) {
-                    state.vel[2] *= 0.25;
-                }
-                state.sector = far;
-            },
-            |state| solids.inside_sector_with_gates(state.sector, state.pos, 0.0, gates),
-            |_| { find_floor = true; },
-            |_, _| {},
-        );
-        find_floor
-    }
-
     /// `sithSurface_DetachThing` (0x4f0a30): the live scroll, only while the surface is scrolling.
     fn surface_scroll(&self, surface: usize) -> [f32; 3] {
         if self.surface_flags.get(surface).is_some_and(|flags| flags & 0x800 != 0)
@@ -7619,8 +7883,12 @@ impl Runtime {
             return Vec3::from(self.surface_scroll(surface));
         }
         let Some(target) = attach.thing else { return Vec3::ZERO };
-        let Some(parent) = self.things.get(target.thing) else { return Vec3::ZERO };
-        match self.floor_parent_move(target.thing) {
+        self.thing_support_velocity(target.thing)
+    }
+
+    fn thing_support_velocity(&self, index: usize) -> Vec3 {
+        let Some(parent) = self.things.get(index) else { return Vec3::ZERO };
+        match self.floor_parent_move(index) {
             1 => Vec3::from(parent.vel),
             2 if !parent.paused => {
                 // The port's frame rate is frames/second; the engine stores path direction × speed.
@@ -7680,23 +7948,14 @@ impl Runtime {
     ) -> bool {
         let identity = |a: crate::collide::Attach| (a.surface, a.thing);
         if previous.map(identity) == state.attach.map(identity) { return false; }
-        if state.move_type == 1 {
-            let old = previous.map_or(Vec3::ZERO, |a| self.floor_velocity(a));
-            let new = state.attach.map_or(Vec3::ZERO, |a| self.floor_velocity(a));
-            state.vel = (Vec3::from(state.vel) + old - new).to_array();
-        }
-        if let Some(old) = previous.filter(|_| state.flags & 0x100 == 0) {
-            if let Some(surface) = old.surface
-                && self.surface_flags.get(surface).is_some_and(|f| f & SITH_SURFACE_COG_LINKED != 0)
-            {
-                self.sith_cog_surface_send_message(surface, sender, "exited");
-            } else if let Some(target) = old.thing
-                && self.things.get(target.thing).is_some_and(|t| t.flags & 0x400 != 0)
-            {
-                self.sith_cog_thing_send_message(target.thing, sender, "exited");
-            }
+        if let Some(old) = previous {
+            self.detach_support(sender, old.surface, old.thing.map(|t| t.thing), state.flags,
+                (state.move_type == 1).then_some(&mut state.vel));
         }
         let Some(new) = state.attach else { return true };
+        if state.move_type == 1 {
+            state.vel = (Vec3::from(state.vel) - self.floor_velocity(new)).to_array();
+        }
         self.sith_thing_attach_thing_to_surface(previous.and_then(|a| a.surface), new.surface, state.flags, sender);
         if let Some(target) = new.thing
             && state.flags & 0x80100 == 0
@@ -7759,9 +8018,9 @@ impl Runtime {
     /// **fall**, not an impact: `sithActor_DamageActor` exempts `SITH_DAMAGE_FALL` (0x40) from
     /// `SITH_AF_INVULNERABLE`, which is why the level-end freeze does not save a body that drops
     /// off a ledge.
-    fn hurt_player_fall(&mut self, damage: f32) {
+    fn hurt_player_fall(&mut self, damage: f32, source: i64) {
         let Some(index) = self.local_player() else { return };
-        let left = self.damage_typed(index as i64, damage, DAMAGE_FALL);
+        let left = self.damage_typed_from(index as i64, damage, DAMAGE_FALL, source);
         if left <= 0.0 {
             self.player_dead = true;
         }
@@ -13770,7 +14029,9 @@ mod tests {
             "the actor did not settle on the slab: z {}",
             rt.things[0].pos[2]
         );
-        assert_eq!(rt.things[0].floor_attach.and_then(|a| a.thing).map(|target| target.thing), Some(1));
+        let attach = rt.things[0].floor_attach.expect("the actor attached to the slab");
+        assert_eq!(attach.thing.map(|hit| hit.thing), Some(1));
+        assert_eq!(rt.things[0].vel[2], 0.0, "the flat contact removes persistent normal velocity");
     }
 
     /// A projectile's own move is what the engine tests (`sithCollision_SearchForCollisions`), not
@@ -17503,6 +17764,7 @@ mod tests {
                 ("health".into(), "100".into()), ("type".into(), "player".into()),
                 ("move".into(), "physics".into()), ("collide".into(), "1".into()),
                 ("physflags".into(), "0x4a4f".into()),
+                ("mass".into(), "150".into()),
             ],
             model3d: None,
             sprite: None,
@@ -17748,34 +18010,94 @@ mod tests {
     }
 
     #[test]
-    fn step_player_applies_fall_damage_to_the_runtime_player() {
+    fn a_hard_floor_contact_charges_only_when_surface_bit_0x80_is_clear() {
         let solids = floor_room();
-        let rt = player_runtime();
         let rules = crate::Rules::from_level(&Level::default());
-        let base = -1.0 + rules.radius;
-        let mut body = walk_body(Vec3::new(0.0, 0.0, base + 0.05));
-        body.grounded = false;
-        // `(3.5 - 2.5)^2 * 45` = 45 damage: a landing, not a fall death.
-        body.vy = -3.5;
-        let rt = World::new(rt);
-        for _ in 0..10 {
-            Runtime::step_player(&rt,
-                &mut body,
-                &solids,
-                PlayerInput::default(),
-                &rules,
-                1.0 / 60.0,
-                || {},
-            );
+        for (flags, health) in [(0, 55.0), (0x80, 100.0)] {
+            let mut rt = player_runtime();
+            rt.surface_flags = vec![flags];
+            let rt = World::new(rt);
+            let base = -1.0 + rules.radius;
+            let mut body = walk_body(Vec3::new(0.0, 0.0, base + 0.05));
+            body.grounded = false;
+            body.gravity = 0.0;
+            // The actual collision takes the pre-restitution speed: (3.5 - 2.5)^2 * 45.
+            body.vy = -3.5;
+            Runtime::step_player(&rt, &mut body, &solids, PlayerInput::default(), &rules, 0.02, || {});
+            assert!(body.vy >= 0.0, "the sweep hit the floor");
+            let rt = rt.borrow();
+            let player = rt.local_player().unwrap();
+            assert_eq!(rt.things[player].health, health, "surface flags {flags:#x}");
         }
+    }
+
+    #[test]
+    fn a_thing_contact_exchanges_force_before_charging_the_mover() {
+        let solids = floor_room();
+        let mut rules = crate::Rules::from_level(&Level::default());
+        rules.air_drag = 0.0;
+        let mut rt = player_runtime();
+        let x = rules.radius + 0.1 + 0.04;
+        let mut target = rt.things[0].clone();
+        target.pos = [x, 0.0, 0.0];
+        target.flags = 0x80; // Unlike a surface, a thing never suppresses the charge.
+        rt.things.push(target);
+        rt.templates.push("walkplayer".into());
+        rt.types.push(2);
+        rt.mass.insert(1, 150.0);
+        solids.set_things(vec![crate::collide::ThingSolid {
+            index: 1, centre: [x, 0.0, 0.0], origin: [x, 0.0, 0.0], radius: 0.1,
+            z_min: -0.1, z_max: 0.1, sector: 0, half: None, yaw: 0.0, mesh: None,
+            thing_flags: 0x80, collide: 1, kind: 2, owner: None, item: false,
+        }]);
+        let rt = World::new(rt);
+        let mut body = walk_body(Vec3::ZERO);
+        body.grounded = false;
+        body.gravity = 0.0;
+        body.vel = [4.0, 0.0];
+        Runtime::step_player(&rt, &mut body, &solids, PlayerInput::default(), &rules, 0.02, || {});
         let rt = rt.borrow();
-        let player = rt.local_player().expect("the level's walkplayer");
-        let health = rt.things[player].health;
-        assert!(
-            (health - 55.0).abs() < 1.0,
-            "a 3.5 u/s landing left {health:.1} health, not 55"
-        );
-        assert!(!rt.player_dead, "an ordinary landing killed the player");
+        // Equal masses, no bounce flags: (4 * 0.5 * 0.5) = 1 u/s transferred.
+        assert_eq!(rt.things[1].vel, [1.0, 0.0, 0.0]);
+        assert_ne!(rt.things[1].phys_flags & 0x8000, 0);
+        assert_ne!(rt.things[0].phys_flags & 0x8000, 0);
+        assert!(body.vel[0].abs() < 0.001, "{:?}", body.vel);
+        // The fresh contact charges for 3 u/s, not the original 4 or the rest position.
+        assert_eq!(rt.things[0].health, 88.75);
+    }
+
+    #[test]
+    fn a_moving_throwable_crate_pushes_another_crate_during_the_tick() {
+        for mover in [0, 1] {
+            let target = 1 - mover;
+            let solids = floor_room();
+            let mut rt = player_runtime();
+            let mut crate_body = rt.things[0].clone();
+            crate_body.phys_flags = 0x404041;
+            rt.things = vec![crate_body; 2];
+            rt.things[mover].vel[0] = 4.0;
+            rt.things[target].pos[0] = 0.24;
+            rt.templates = vec!["_throwable".into(); 2];
+            rt.types = vec![4; 2];
+            rt.template_move.insert("_throwable".into(), "physics".into());
+            rt.template_collide.insert("_throwable".into(), 1);
+            rt.template_hit.insert("_throwable".into(), (0.1, 0.1));
+            rt.mass = [(0, 25.0), (1, 25.0)].into();
+            rt.gravity = 0.0;
+            solids.set_things(rt.things.iter().enumerate().map(|(index, t)| crate::collide::ThingSolid {
+                index, centre: t.pos, origin: t.pos, radius: 0.1, z_min: -0.1, z_max: 0.1, sector: 0,
+                half: None, yaw: 0.0, mesh: None, thing_flags: 0, collide: 1, kind: 4, owner: None, item: false,
+            }).collect());
+
+            rt.step(Some(&solids), 0.02);
+
+            assert_eq!(rt.things[target].vel, [1.0, 0.0, 0.0], "equal masses transfer one quarter of the approach");
+            assert!(rt.things[mover].vel[0].abs() < 0.001, "the mover also runs CollideHurt");
+            if target < mover {
+                rt.step(Some(&solids), 0.02);
+            }
+            assert!((rt.things[target].pos[0] - 0.26).abs() < 1e-6, "the other crate's next move uses that impulse");
+        }
     }
 
     #[test]
