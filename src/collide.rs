@@ -789,6 +789,11 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
     }
 }
 
+/// `sithPhysics_GetThingHeight` (0x4f6210): only the zero field falls back to model insert.
+pub fn get_thing_height(height: f32, model_insert_z: f32, move_size: f32) -> f32 {
+    if height != 0.0 { height } else { model_insert_z.max(move_size + 0.005) }
+}
+
 /// What a body is attached to (`sithThing` `+0x34`/`+0x38`/`+0x44`): the floor's into-room normal and a
 /// point on its plane, the surface when it is one (a thing face has none), and the drag scale its surface
 /// flags give (`0x4f7430`).
@@ -1353,28 +1358,17 @@ impl LevelGeometry {
     /// dry. The distance is `thing+0x48`, the depth the underwater update holds the body at; `None`
     /// clears physflag `0x100000`.
     pub fn water_surface(&self, sector: usize, pos: [f32; 3], gates: Gates<'_>, dry: impl Fn(usize) -> bool) -> Option<f32> {
-        const UP: [f32; 3] = [0.0, 0.0, 1.0];
-        let mut searched = vec![sector];
-        let mut here = sector;
-        loop {
-            let nearest = self
-                .portals
-                .get(here)?
-                .iter()
-                .filter(|portal| !searched.contains(&portal.adjoin) && gates.passable(here, portal.adjoin, portal.link))
-                .filter_map(|portal| {
-                    let normal = [-portal.normal[0], -portal.normal[1], -portal.normal[2]];
-                    let t = sphere_plane(pos, UP, 0.05, 0.0, normal, portal.point, 0, &mut 0.0)?;
-                    face_edge_mask([pos[0], pos[1], pos[2] + t], 0.0, normal, &portal.verts)?;
-                    Some((t, portal.adjoin))
-                })
-                .min_by(|a, b| a.0.total_cmp(&b.0))?;
-            if dry(nearest.1) {
-                return Some(nearest.0);
+        let mut search = CollisionSearch::new();
+        self.search_for_collisions(sector, None, pos, [0.0, 0.0, 1.0], 0.05, 0.0,
+            gates, 1, &mut search);
+        while let Some(record) = search.pop() {
+            if let CollisionRecord::Crossing { distance, sector, .. } = record
+                && dry(sector)
+            {
+                return Some(distance);
             }
-            searched.push(nearest.1);
-            here = nearest.1;
         }
+        None
     }
 
     /// One surface's contact for a sphere of `radius` sweeping `dir` over `left` from `from`.
@@ -2082,14 +2076,11 @@ impl LevelGeometry {
     ///
     /// - `:27-29` a body with no sector does nothing (the port's sector is always valid).
     /// - `:30-44` the search direction is world down carrying `0x10`, so only floor-flagged
-    ///   surfaces (`surfflags & 1`) and standable thing faces count; the physflag-`0x80` arm
-    ///   orients the search by the body instead, and no ported body carries `0x80` (the flags
-    ///   this port reads: 0x4a4f, 0x225, 0x201, 0x400000), so that arm is elided.
-    /// - `:45-65` the reach: an unattached, unforced call searches `radius + 0.005`
-    ///   (`0x523184` = −0.005); an attached or forced one searches
-    ///   `max(GetThingHeight, radius + 0.005)` doubled under physflags `0xc0`
-    ///   (`0x52318c` = 1.1 otherwise).
-    /// - `:67-100` two passes: a radius-0 ray, then — only for kinds 2 (item) and 10 (player),
+    ///   surfaces (`surfflags & 1`) and standable thing faces count. The physflag-`0x80`
+    ///   arm uses the body's own down direction without `0x10`.
+    /// - `:45-65` an unattached, unforced call searches `radius + 0.005`. An attached or
+    ///   forced call uses `GetThingHeight` multiplied by 1.1, or doubled under `0xc0`.
+    /// - `:67-100` two passes: a radius-0 ray, then — only for kinds 2 (actor) and 10 (player),
     ///   with a non-zero radius, and only when the ray attached nothing — the body's radius.
     /// - `:71-94` the pop loop takes records nearest first: a flag-2 record attaches to its
     ///   surface (`sithThing_AttachThingToSurface` `0x4cde80` records it without moving the
@@ -2107,6 +2098,13 @@ impl LevelGeometry {
     pub fn find_floor(
         &self, state: &mut MoveState, radius: f32, height: f32, gates: Gates<'_>, force: bool,
     ) {
+        self.find_floor_for(state, radius, height, gates, force, None, [0.0, 0.0, 1.0]);
+    }
+
+    pub fn find_floor_for(
+        &self, state: &mut MoveState, radius: f32, height: f32, gates: Gates<'_>, force: bool,
+        thing: Option<usize>, up: [f32; 3],
+    ) {
         let underwater =
             gates.sectors.get(state.sector).is_some_and(|flags| flags & SECTOR_UNDERWATER != 0);
         if underwater {
@@ -2114,72 +2112,47 @@ impl LevelGeometry {
                 state.water_surface = self.water_surface(state.sector, state.pos, gates, |s| {
                     !gates.sectors.get(s).is_some_and(|flags| flags & SECTOR_UNDERWATER != 0)
                 });
+                if state.water_surface.is_some() {
+                    state.phys_flags |= 0x100000;
+                } else {
+                    state.phys_flags &= !0x100000;
+                }
             }
             return;
         }
-        const DOWN: [f32; 3] = [0.0, 0.0, -1.0];
-        let flags = 0x2802 | 0x10;
-        let reach = if !force && state.attach.is_none() {
+        let (dir, flags) = if state.phys_flags & 0x80 == 0 {
+            ([0.0, 0.0, -1.0], 0x2812)
+        } else {
+            (up.map(|v| -v), 0x2802)
+        };
+        let reach = if !force && state.attach.is_none() && state.attach_flags == 0 {
             radius + 0.005
         } else if state.phys_flags & 0xc0 == 0 {
-            height.max(radius + 0.005) * 1.1
+            height * 1.1
         } else {
-            height.max(radius + 0.005) * 2.0
+            height * 2.0
         };
         if reach > 0.0 {
             let mut pass = 0.0f32;
             loop {
                 let mut search = CollisionSearch::new();
+                if let Some(thing) = thing { search.exclude_thing(thing); }
                 self.search_for_collisions(
-                    state.sector, None, state.pos, DOWN, reach, pass, gates, flags, &mut search,
+                    state.sector, None, state.pos, dir, reach, pass, gates, flags, &mut search,
                 );
-                let pos = state.pos;
                 while let Some(record) = search.pop() {
                     let CollisionRecord::Solid(hit) = record else { continue };
                     if let Some(target) = hit.thing {
-                        let Some((mesh, face)) = target.mesh_face else {
+                        let Some(attach) = self.thing_face_attach(target) else {
                             // `:79-82` a thing record with no face stops the search.
                             return;
                         };
-                        let things = self.things();
-                        let solid = things.iter().find(|solid| solid.index == target.thing).unwrap();
-                        let face = &solid.mesh.as_ref().unwrap()[mesh][face];
-                        if face.normal[2] < 0.6 {
-                            continue;
-                        }
-                        if std::env::var_os("BK_FLOOR_TRACE").is_some() {
-                            eprintln!(
-                                "floor: attach thing {} point {:?} pos {:?} r {pass} reach {reach}",
-                                target.thing, face.point, pos
-                            );
-                        }
-                        state.attach = Some(Attach {
-                            normal: face.normal, point: face.point, surface: None, thing: Some(target), friction: 1.0,
-                        });
+                        if flags & 0x10 != 0 && attach.normal[2] < 0.6 { continue; }
+                        Self::set_floor_attach(state, attach, 2);
                         return;
                     }
-                    if let Some(face) = self.face_of.get(&hit.surface).and_then(|i| self.faces.get(*i))
-                        .or_else(|| self.floor_of.get(&hit.surface).and_then(|i| self.floors.get(*i)))
-                        .or_else(|| self.wall_of.get(&hit.surface).and_then(|i| self.walls.get(*i)))
-                    {
-                        // The attach normal (`+0x44`) points into the room, toward the body standing on it.
-                        let normal = if dot(sub(pos, face.point), face.normal) < 0.0 {
-                            [-face.normal[0], -face.normal[1], -face.normal[2]]
-                        } else {
-                            face.normal
-                        };
-                        let surface_flags = self.surface_flags.get(hit.surface).copied().unwrap_or(0);
-                        // `0x4f7430`: surface flags `0x1000` and `0x2000` scale the drag to 0.3 and 0.1.
-                        let friction =
-                            if surface_flags & 0x3000 == 0 { 1.0 } else if surface_flags & 0x2000 == 0 { 0.3 } else { 0.1 };
-                        if std::env::var_os("BK_FLOOR_TRACE").is_some() {
-                            eprintln!(
-                                "floor: attach surface {} owner {:?} normal {:?} point {:?} pos {:?} r {pass} reach {reach} friction {friction}",
-                                hit.surface, self.surface_owner.get(hit.surface), normal, face.point, pos
-                            );
-                        }
-                        state.attach =
-                            Some(Attach { normal, point: face.point, surface: Some(hit.surface), thing: None, friction });
+                    if let Some(attach) = self.surface_attach(hit) {
+                        Self::set_floor_attach(state, attach, 1);
                         return;
                     }
                 }
@@ -2192,6 +2165,49 @@ impl LevelGeometry {
         }
         // `:102-104` both passes exhausted: detach.
         state.attach = None;
+        state.attach_flags = 0;
+    }
+
+    /// `sithThing_AttachThingToThingFace` (0x4ce050:37-45): the selected mesh's face vertex and
+    /// authored normal, already transformed under the parent's live orientation for collision.
+    pub fn thing_face_attach(&self, target: ThingHit) -> Option<Attach> {
+        let (mesh, face) = target.mesh_face?;
+        let things = self.things();
+        let solid = things.iter().find(|solid| solid.index == target.thing)?;
+        let face = solid.mesh.as_ref()?.get(mesh)?.get(face)?;
+        Some(Attach {
+            normal: face.normal,
+            point: face.verts.first().copied().unwrap_or(face.point),
+            surface: None,
+            thing: Some(target),
+            friction: 1.0,
+        })
+    }
+
+    /// `sithThing_AttachThingToSurface` (0x4cde80:31-42): store the authored plane, not the
+    /// sphere contact normal or a normal flipped according to the body's pose.
+    fn surface_attach(&self, hit: Sweep) -> Option<Attach> {
+        let (normal, point) = if let Some(face) = self.face_of.get(&hit.surface).and_then(|i| self.faces.get(*i))
+            .or_else(|| self.floor_of.get(&hit.surface).and_then(|i| self.floors.get(*i)))
+            .or_else(|| self.wall_of.get(&hit.surface).and_then(|i| self.walls.get(*i)))
+        {
+            (face.normal, face.point)
+        } else {
+            let portal = self.portals.get(hit.sector)?.iter()
+                .find(|portal| self.adjoin_surface.get(portal.link) == Some(&hit.surface))?;
+            (portal.normal, portal.point)
+        };
+        let flags = self.surface_flags.get(hit.surface).copied().unwrap_or(0);
+        let friction = if flags & 0x2000 != 0 { 0.1 } else if flags & 0x1000 != 0 { 0.3 } else { 1.0 };
+        Some(Attach { normal: normal.map(|v| -v), point, surface: Some(hit.surface), thing: None, friction })
+    }
+
+    fn set_floor_attach(state: &mut MoveState, attach: Attach, flags: u32) {
+        if state.attach.is_none_or(|old| old.surface != attach.surface || old.thing != attach.thing) {
+            state.attach_flags = flags;
+            state.phys_flags &= !0x100;
+        }
+        state.attach = Some(attach);
     }
 
     /// One physics step of a body: `sithPhysics_UpdateThing`'s routing (`0x4f5900:22-34`) — the
@@ -2454,12 +2470,7 @@ impl LevelGeometry {
             .any(|face| sphere_face(pos, radius, face))
     }
 
-    /// `sithPhysics_FindFloor`: the floor under a body, found by sweeping a sphere straight down.
-    ///
-    /// The engine's range is `height * 1.1` (and `moveSize + 0.005` for a body that is not attached yet),
-    /// which is what lets it find a floor it has just stepped off. The sweep crosses adjoins, so the
-    /// floor of the room *below* a walkway's portal is found from above — that being exactly the case
-    /// this port used to fall through.
+    /// Recovery probe for spawn and authored AI positioning, not the runtime FindFloor.
     pub fn floor_under(
         &self,
         sector: usize,
@@ -2469,7 +2480,7 @@ impl LevelGeometry {
     ) -> Option<(f32, f32, usize)> {
         // `floor_candidates` is the one loop; this picks the highest landing, which is the surface the
         // sphere meets first falling from `pos`. Both callers share it so a probe cannot drift from
-        // the walker's own answer.
+        // the recovery tool's answer.
         let mut best: Option<(f32, f32, usize)> = None;
         for (floor, travelled, owner, _, _) in self.floor_candidates(sector, pos, height, radius) {
             if best.is_none_or(|(near, _, _)| floor > near) {
@@ -2503,7 +2514,7 @@ impl LevelGeometry {
     }
 
     /// Every face a downward sphere sweep from `pos` lands on, as `(floor height, distance travelled,
-    /// owning sector, the face's own normal, surface id)`. The walker's answer is the highest of these; the
+    /// owning sector, the face's own normal, surface id)`. The recovery probe picks the highest of these; the
     /// `--floor-at` probe prints them all, which is what makes a floor disagreement a table instead of
     /// an argument.
     pub fn floor_candidates(
@@ -2613,7 +2624,7 @@ impl LevelGeometry {
     }
 }
 
-/// What a body's feet come to rest on: the single floor answer every motion caller shares.
+/// The feet height and contact details reported by the authored AI placement probe.
 ///
 /// `height` is the **feet** height, not the centre: a swept sphere stops with its centre one
 /// `radius` above a face, a sector plane and a solid thing's top are already feet heights, so every
@@ -2630,25 +2641,12 @@ pub struct Rest {
 }
 
 impl LevelGeometry {
-    /// The one floor rule: the player, AI settling, actor grounding and gravity landing all ask
-    /// this, and no caller keeps a second support rule behind it.
+    /// AI positioning's recovery probe, not the live `FindFloor` attachment path.
     ///
-    /// In the engine's own order, highest answer wins:
-    ///
-    /// 1. the downward sphere sweep's faces — a catwalk slab, a ramp, a face-only floor;
-    /// 2. a sector's own floor **plane** where its data has no face inside the engine's floor
-    ///    reach (`18Ascend`'s shaft opening), and the planes of the sectors around a body whose
-    ///    sector carries no floor plane at all (`19A`'s 723, level 18's spawn);
-    /// 3. a solid thing's model top (`collide=`, `ThingSolid::z_max`) — a crate, a catwalk, a lift.
-    ///
-    /// `reach` is how far below the feet a surface may be and still count: the walker passes this
-    /// frame's fall, so a body in the air is not caught by a floor it has not reached. Motion
-    /// callers that want the floor under a body wherever it is (actor grounding) pass
-    /// `f32::INFINITY` and compare the answer with their own reach.
-    ///
-    /// `lift` is the one exception a **placement** needs: `true` lets the answer sit up to the plane
-    /// query's own 0.05 tolerance above the body, and the caller decides whether to raise it (the
-    /// player's initial seat). Every motion caller passes `false`; a falling body never lifts.
+    /// `shortcut: include the world-face, plane and model-top estimates until walked AI
+    /// drives the swept physics mover instead of directly placing its next position.`
+    /// Highest reachable estimate wins. `reach` limits the drop and `lift` permits the
+    /// plane query's 0.05 tolerance above the feet.
     pub fn resting_floor(
         &self,
         sector: usize,
@@ -4365,6 +4363,20 @@ mod tests {
         assert_eq!(sector, 1, "the floor belongs to the lower sector");
         assert!((floor + 1.5).abs() < 1e-3, "floor {floor}");
         assert!((gap - 0.75).abs() < 1e-3, "gap {gap}");
+
+        let mut body = floor_state([0.0, 0.0, -0.5], None, 10);
+        let closed = Gates { sectors: &[], adjoins: &[0, 0] };
+        solids.find_floor(&mut body, 0.25, 0.6, closed, true);
+        assert!(body.attach.is_none(), "the disconnected lower claim must not win");
+        solids.find_floor(&mut body, 0.25, 0.6, Gates::default(), true);
+        let via_portal = body.attach.expect("reachable lower claim");
+        assert_eq!(via_portal.surface, Some(0));
+        assert_eq!(via_portal.point[2], -1.5);
+        assert_eq!(body.sector, 0, "finding a support is not a sector cross");
+        body.sector = 1;
+        body.pos[2] = -0.9;
+        solids.find_floor(&mut body, 0.25, 0.6, closed, false);
+        assert_eq!(body.attach, Some(via_portal), "same support on either side of the boundary");
     }
     #[test]
     fn the_floor_knows_which_surface_it_is() {
@@ -5386,7 +5398,7 @@ mod tests {
     }
 
     /// `0x4f5550:45-65`: an unattached body searches `moveSize + 0.005` (`0x523184`) down, an
-    /// attached one `max(GetThingHeight, moveSize + 0.005)` — doubled under physflags `0xc0`
+    /// attached one searches `GetThingHeight` — doubled under physflags `0xc0`
     /// (`0x52318c` = 1.1 otherwise) — and only a floor-flagged surface attaches.
     #[test]
     fn find_floor_reaches_by_attach_state_and_takes_only_floors() {
@@ -5408,6 +5420,17 @@ mod tests {
         let mut state = floor_state(pos, Some(FLAT), 10);
         solids.find_floor(&mut state, 0.065, 0.12, Gates::default(), false);
         assert_eq!(state.attach.map(|a| a.friction), Some(0.1));
+    }
+
+    #[test]
+    fn forced_floor_search_uses_explicit_height_without_a_radius_clamp() {
+        let solids = room();
+        let mut state = floor_state([0.0, 0.0, -0.94], None, 2);
+        // `0x4f5550:49-64`: explicit height 0.02 doubles to 0.04. The ray cannot
+        // reach the floor at -1; use a kind without the radius retry to isolate the ray.
+        state.kind = 3;
+        solids.find_floor(&mut state, 0.065, 0.02, Gates::default(), true);
+        assert!(state.attach.is_none());
     }
 
     /// `0x4f5550:96-100`: only kinds 2 and 10 retry the search at the body's radius — a floor the
