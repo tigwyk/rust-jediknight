@@ -4902,72 +4902,8 @@ impl Runtime {
                 }
                 false
             }
-            // `lookfortarget` (`0x50aa80`, accept `0x204`): the engine branches on the mode word —
-            // `0x200` set runs **branch B** only (the memory-decay wake: `last_seen + fltArg[1] <
-            // now` clears the searching word and sets the awake bit); `0x200` clear with `0x4` set
-            // runs **branch A**, the scan: re-arm at the class interval, refresh sight, and on a
-            // find write `(flags & !4) | 0x232`, play the spot sound, remember, and broadcast a
-            // kind-0 awareness event at strength 3.0.
-            "lookfortarget" => {
-                if std::env::var_os("BK_NO_SCAN").is_some() {
-                    return false;
-                }
-                let flags = self.ai_flags.get(&index).copied().unwrap_or(0);
-                if flags & 0x200 != 0 {
-                    // Branch B: the memory-decay timeout (fltArg[1], 40000 ms shipped).
-                    let decay = instinct.args.first().copied().unwrap_or(0.0) / 1000.0;
-                    if decay > 0.0
-                        && self.time
-                            >= self.ai_last_seen_at.get(&index).copied().unwrap_or(0.0) + decay
-                    {
-                        self.ai_flags.insert(index, (flags & 0xffff_f9dd) | 0x4);
-                        return true;
-                    }
-                    return false;
-                }
-                if flags & 0x4 == 0 {
-                    return false;
-                }
-                let interval = (instinct.weight / 1000.0).max(0.05);
-                rearm(self, self.time + interval);
-                let Some(class) = self.ai.get(&index).cloned() else {
-                    return false;
-                };
-                // `sithAI_CheckSightThing` (`0x4eb090`, #91's transliteration) is the scan's
-                // whole sight test: the eye `sithAI_sub_4EAD60` raises above the body, the range
-                // gate that removes the target's radius twice, the sideways-component cone, then
-                // the collision ray — surfaces and solid things both.
-                let sight = self.check_sight_thing(
-                    index, ctx.eye, player, class.fovcos(), class.sightdist,
-                );
-                if std::env::var("BK_AI_TRACE").is_ok_and(|v| v == "2") {
-                    eprintln!(
-                        "ai: {index} `{}` scan at {:.2} s sight {sight} flags {flags:#x}",
-                        ctx.template, self.time
-                    );
-                }
-                if sight == 0 && self.can_detect(index, player) {
-                    self.ai_detected.insert(index);
-                    self.remember(index, ctx.target, "lookfortarget");
-                    let flags = self.ai_flags.entry(index).or_insert(0);
-                    *flags = (*flags & 0xffff_fffb) | 0x232;
-                    if let Some(sector) = self.things.get(player).map(|t| t.sector) {
-                        self.transmit_awareness(sector, 0, ctx.from, AI_AWARE_SIGHT, Some(player));
-                    }
-                    let range = ((ctx.target[0] - ctx.eye[0]).powi(2)
-                        + (ctx.target[1] - ctx.eye[1]).powi(2)
-                        + (ctx.target[2] - ctx.eye[2]).powi(2))
-                    .sqrt();
-                    if std::env::var_os("BK_AI_TRACE").is_some() {
-                        eprintln!(
-                            "ai: {index} `{}` LookForTarget finds the body at {range:.2}",
-                            ctx.template
-                        );
-                    }
-                    return true;
-                }
-                false
-            }
+            // `lookfortarget` (`0x50aa80`, accept `0x204`): see `sithAICmd_LookForTarget`.
+            "lookfortarget" => self.sithAICmd_LookForTarget(index, slot, instinct, player, ctx),
             // `sensedanger` (`0x50b9b0`, accept 4 reject 0x800): the scheduler branch looks the
             // player over once a second while awake and not yet alerted; a roll under fltArg[1]
             // that sees the player alerts: `flags & ~4 | 0x800`, the fear sound, a kind-1
@@ -5038,44 +4974,13 @@ impl Runtime {
                     .insert(index, ctx.yaw + crate::cog::pseudo_random() as f32 * 360.0);
                 true
             }
-            // `opendoors` (`0x50abc0`): the player's own activate action on the actor's body,
-            // only while the moving bit `0x1` is set. Returns 0; the scheduler's now+1000 arm is
-            // the handler's own re-arm.
-            "opendoors" => {
-                if self.ai_flags.get(&index).copied().unwrap_or(0) & 0x1 == 0 {
-                    return false;
-                }
-                let reach = self.activate_reach(index);
-                let dir = [-ctx.yaw.to_radians().sin(), ctx.yaw.to_radians().cos(), 0.0];
-                self.sith_player_actions_activate(index, ctx.from, dir, reach, ctx.sector);
-                false
-            }
-            // `hitandrun` (`0x50bb90`, accept `0xc00`): per firing pass `acc += 1000`; a pass that
-            // did not fire resets it; `fltArg[0] < acc` breaks off (`flags |= 0x800`, next at
-            // `now + fltArg[1]`). The port reads "fired" as the last shot inside half a second,
-            // its stand-in for the engine's just-fired bit `0x400`.
-            "hitandrun" => {
-                let fired = ctx.sighted
-                    && self
-                        .last_shot
-                        .get(&index)
-                        .is_some_and(|at| self.time - at < 0.5);
-                if !fired {
-                    self.ai_hitrun.remove(&index);
-                    return false;
-                }
-                let hold_ms = instinct.weight.max(1.0);
-                let break_off = instinct.args.first().copied().unwrap_or(3000.0).max(1.0) / 1000.0;
-                let acc = self.ai_hitrun.entry(index).or_insert(0.0);
-                *acc += 1000.0;
-                if hold_ms < *acc {
-                    self.ai_hitrun.remove(&index);
-                    self.ai_withdraw.insert(index, (player, Some(self.time + break_off)));
-                    rearm(self, self.time + break_off);
-                    return true;
-                }
-                false
-            }
+            // `opendoors` (`0x50abc0`): see `sithAICmd_OpenDoors`.
+            "opendoors" => self.sithAICmd_OpenDoors(index, ctx),
+            // `hitandrun` (`0x50bb90`, accept `0xc00`): see `sithAICmd_HitAndRun`.
+            "hitandrun" => self.sithAICmd_HitAndRun(index, slot, instinct, player),
+            // `lobfire` (`0x509cd0`, accept 2): see `sithAICmd_LobFire` — the scheduler branch
+            // fires the lobbed shot itself.
+            "lobfire" => self.sithAICmd_LobFire(index, slot, instinct, player, ctx),
             // `retreat` (`0x50bc60`, accept 2 reject 0x800): when health falls under
             // `fltArg[0] x max` and a `fltArg[1]` roll passes, set the alert bit and remember the
             // player in the target slot (the port's `ai_withdraw` walk stands in for the
@@ -5135,6 +5040,228 @@ impl Runtime {
             }
             _ => false,
         }
+    }
+
+    /// Re-arm one instinct's own clock — the engine handler's `inst + 4` write.
+    fn ai_rearm(&mut self, index: usize, slot: usize, next: f32) {
+        if let Some(clock) = self.ai_inst.get_mut(&index).and_then(|s| s.get_mut(slot)) {
+            *clock = next;
+        }
+    }
+
+    /// `sithAICmd_OpenDoors` (`0x50abc0`): while the moving bit `0x1` is set, run the player's own
+    /// activate action on the actor's body. Returns 0 — the engine's `now + 1000` re-arm is the
+    /// same value the scheduler's default arm already wrote, so the handler adds nothing.
+    fn sithAICmd_OpenDoors(&mut self, index: usize, ctx: &AiCtx) -> bool {
+        if self.ai_flags.get(&index).copied().unwrap_or(0) & 0x1 == 0 {
+            return false;
+        }
+        let reach = self.activate_reach(index);
+        let dir = [-ctx.yaw.to_radians().sin(), ctx.yaw.to_radians().cos(), 0.0];
+        self.sith_player_actions_activate(index, ctx.from, dir, reach, ctx.sector);
+        false
+    }
+
+    /// `FUN_0050aa80` (`sithAICmd_LookForTarget`, accept `0x204`): the awake gates, then one branch
+    /// per mode word. The engine's outer gate `DAT_008ee66c & 0x200` is the console's
+    /// target-search toggle (`sithCommand_DebugMode` case 6), never set in play; the port has no
+    /// console, so it reads clear.
+    ///
+    /// **A** (`0x200` clear, `0x4` set) — the scan. Re-arm at `now + arg0` and take the player
+    /// into the target slot (`ai + 0x74`) first; if the player is not `0x202`-flagged, refresh
+    /// sight: `check_sight_thing` (`0x4eb090`) is the whole sight test and the detect roll rides
+    /// the same refresh (`CanDetectSightThing` inside `sub_4EAD60`). Visible: the word becomes
+    /// `(flags & !4) | 0x232`, the `alert` spot sound (`PlayModeRandom 0x4c` in the soundclass
+    /// mode table, base `0x54b408`), the kind-0 awareness broadcast at strength 3.0
+    /// (`0x40400000`), the player into the fire-target slot (`ai + 0x85`), return 1. The
+    /// `PlayModeFirst(thing, 2)` puppet track on a find has no port puppet to play. Not visible
+    /// and `arg0 == _DAT_00523294` (0.0, read from the shipped image): the engine rewrites the
+    /// class argument to 500, so the next scan comes in half a second.
+    ///
+    /// **B** (`0x200` set) — the memory-decay wake: `arg1 != 0 && last_seen + arg1 < now` writes
+    /// `(flags & 0xfffff9dd) | 4` and levels the head (`SetHeadPYR` with the zero vector at
+    /// `0x522af8`), return 1.
+    fn sithAICmd_LookForTarget(
+        &mut self,
+        index: usize,
+        slot: usize,
+        instinct: &crate::ai::Instinct,
+        player: usize,
+        ctx: &AiCtx,
+    ) -> bool {
+        if std::env::var_os("BK_NO_SCAN").is_some() {
+            return false;
+        }
+        let flags = self.ai_flags.get(&index).copied().unwrap_or(0);
+        if flags & 0x200 == 0 {
+            if flags & 0x4 == 0 {
+                return false;
+            }
+            self.ai_rearm(index, slot, self.time + (instinct.weight / 1000.0).max(0.05));
+            if !self
+                .things
+                .get(player)
+                .is_some_and(|t| t.flags & 0x202 == 0 && !t.destroyed)
+            {
+                return false;
+            }
+            let Some(class) = self.ai.get(&index).cloned() else {
+                return false;
+            };
+            let sight =
+                self.check_sight_thing(index, ctx.eye, player, class.fovcos(), class.sightdist);
+            if std::env::var("BK_AI_TRACE").is_ok_and(|v| v == "2") {
+                eprintln!(
+                    "ai: {index} `{}` scan at {:.2} s sight {sight} flags {flags:#x}",
+                    ctx.template, self.time
+                );
+            }
+            if sight == 0 && self.can_detect(index, player) {
+                self.ai_detected.insert(index);
+                self.remember(index, ctx.target, "lookfortarget");
+                self.ai_flags
+                    .insert(index, (flags & 0xffff_fffb) | 0x232);
+                self.queue_mode_sound(index, "alert", ctx.from);
+                if let Some(sector) = self.things.get(player).map(|t| t.sector) {
+                    self.transmit_awareness(sector, 0, ctx.from, AI_AWARE_SIGHT, Some(player));
+                }
+                self.ai_fire_target.insert(index, player);
+                if std::env::var_os("BK_AI_TRACE").is_some() {
+                    eprintln!(
+                        "ai: {index} `{}` LookForTarget finds the body at {:?}",
+                        ctx.template, ctx.target
+                    );
+                }
+                return true;
+            }
+            if instinct.weight == 0.0 {
+                self.ai_rearm(index, slot, self.time + 0.5);
+            }
+            return false;
+        }
+        let decay = instinct.args.first().copied().unwrap_or(0.0) / 1000.0;
+        if decay > 0.0
+            && self.time
+                >= self.ai_last_seen_at.get(&index).copied().unwrap_or(0.0) + decay
+        {
+            self.ai_flags.insert(index, (flags & 0xffff_f9dd) | 0x4);
+            if let Some(thing) = self.things.get_mut(index) {
+                thing.head_pitch = 0.0;
+            }
+            return true;
+        }
+        false
+    }
+
+    /// `sithAICmd_HitAndRun` (`0x50bb90`, accept `0xc00`): the attack-then-withdraw state machine,
+    /// read straight off the decompile.
+    ///
+    /// - `0x800` set: the break-off is over — clear it and return 1 (the re-engage).
+    /// - `0x400` set (a shot went out; `sithAICmd_PrimaryFire` sets it on every committed fire):
+    ///   `acc -= _DAT_005232f4` with the constant **−1000.0** read from the shipped image — one
+    ///   more second of firing per pass. `fltArg[0] < acc`: reset the accumulator,
+    ///   `flags |= 0x800`, hand the current target to the withdraw walk (`ai + 0x1c0 =
+    ///   ai + 0x1d0`; the port's stand-in is the `ai_withdraw` walk at the handler's own
+    ///   deadline), re-arm at `now + fltArg[1]`, return 1. Otherwise re-arm at `now + 1000` and
+    ///   return that (non-zero: the engine's handler signals "acted", though the word did not
+    ///   change, so no cascade follows).
+    /// - Neither bit: reset the accumulator, return 0.
+    fn sithAICmd_HitAndRun(
+        &mut self,
+        index: usize,
+        slot: usize,
+        instinct: &crate::ai::Instinct,
+        player: usize,
+    ) -> bool {
+        let flags = self.ai_flags.get(&index).copied().unwrap_or(0);
+        if flags & 0x800 != 0 {
+            self.ai_flags.insert(index, flags & !0x800);
+            return true;
+        }
+        if flags & 0x400 != 0 {
+            let acc = self.ai_hitrun.entry(index).or_insert(0.0);
+            *acc -= -1000.0;
+            if instinct.weight < *acc {
+                *acc = 0.0;
+                self.ai_flags.insert(index, flags | 0x800);
+                let break_off = instinct.args.first().copied().unwrap_or(3000.0) / 1000.0;
+                self.ai_withdraw.insert(index, (player, Some(self.time + break_off)));
+                self.ai_rearm(index, slot, self.time + break_off);
+                return true;
+            }
+            self.ai_rearm(index, slot, self.time + 1.0);
+            return true;
+        }
+        self.ai_hitrun.insert(index, 0.0);
+        self.ai_rearm(index, slot, self.time + 1.0);
+        false
+    }
+
+    /// `FUN_00509cd0` (`sithAICmd_LobFire`, accept 2, event mask `0x100`) — the handler wiring #93
+    /// left out. The scheduler branch (event 0) is the fire path: with the player `0x202`-flagged
+    /// (gone) it stops the fight — the `flee` sound (`PlayModeRandom 0x52`) when a shot is still
+    /// owed (`0x400`), the puppet land track (`PlayMode 0x25`, no port puppet), and
+    /// `flags = (flags & 0xfffff9dd) | 4`. Otherwise `sithAI_FireWeapon` with `fl = 2` — the lob,
+    /// #93's arithmetic — with `minD/maxD/dotTol/err` from the class's numbers 3-6 and a weapon-2
+    /// roll (`rand()/32768 < fltArg[5]`). Fired: `flags |= 0x400`, and both the fire lockout
+    /// `ai + 0xa2` and the re-arm land at `now + arg0`. Refused (or not visible: the engine's
+    /// `ai[0x7d] != 0` gate inside `FireWeapon`): a look frame at the player, `flags |= 0x400`,
+    /// re-arm at `now + 500`. Every path returns 0 — this handler never raises the cascade. The
+    /// event-`0x100` branch (holster/draw with the awake bit, `sithPuppet_SetArmedMode`) lives in
+    /// `emit_ai_event`'s dispatch.
+    fn sithAICmd_LobFire(
+        &mut self,
+        index: usize,
+        slot: usize,
+        instinct: &crate::ai::Instinct,
+        player: usize,
+        ctx: &AiCtx,
+    ) -> bool {
+        let flags = self.ai_flags.get(&index).copied().unwrap_or(0);
+        let player_gone = !self
+            .things
+            .get(player)
+            .is_some_and(|t| t.flags & 0x202 == 0 && !t.destroyed);
+        if player_gone {
+            if flags & 0x400 != 0 {
+                self.queue_mode_sound(index, "flee", ctx.from);
+            }
+            self.ai_flags.insert(index, (flags & 0xffff_f9dd) | 0x4);
+            return true;
+        }
+        let refused = !ctx.sighted || {
+            let accuracy = self.ai.get(&index).map(|c| c.accuracy);
+            let mode = u32::from(
+                crate::cog::pseudo_random() < instinct.args.get(4).copied().unwrap_or(0.0) as f64,
+            );
+            matches!(
+                self.sithAI_FireWeapon(
+                    index,
+                    player,
+                    ctx.target,
+                    instinct.args.get(1).copied().unwrap_or(0.0),
+                    instinct.args.get(2).copied().unwrap_or(f32::MAX),
+                    instinct.args.first().copied().unwrap_or(0.5),
+                    instinct.args.get(3).copied().unwrap_or(0.0),
+                    mode,
+                    2,
+                    accuracy,
+                ),
+                FireOutcome::Refused
+            )
+        };
+        if refused {
+            self.ai_set_look_frame(index, ctx.target);
+            *self.ai_flags.entry(index).or_insert(0) |= 0x400;
+            self.ai_rearm(index, slot, self.time + 0.5);
+            return false;
+        }
+        *self.ai_flags.entry(index).or_insert(0) |= 0x400;
+        let at = self.time + (instinct.weight / 1000.0).max(0.05);
+        self.ai_fire_lock.insert(index, at);
+        self.ai_rearm(index, slot, at);
+        self.last_shot.insert(index, self.time);
+        false
     }
     /// The nearest actor a shot from `from` along `dir` would sweep into within `range` — the port's
     /// stand-in for the engine's `sithCollision_SearchForCollisions` in the player-fire pre-sweep. The
@@ -14622,13 +14749,14 @@ mod tests {
                  Follow 0.0, 0.5\n",
             ),
         );
-        // `hitandrun`'s registry word is `0xc00` — the scheduler only runs it in that mode.
-        rt.ai_flags.insert(1, 0xc00);
-        // It is firing: `last_shot` is what `PrimaryFire` sets and what the handler reads, and it is
-        // refreshed each frame of the window.
+        // `hitandrun`'s registry word is `0xc00` (any of `0x400`/`0x800` accepts); the firing
+        // window is the `0x400` word alone — `0x800` is the break-off bit the handler clears.
+        rt.ai_flags.insert(1, 0x400);
+        // It is firing: the mode bit `0x400` is what `sithAICmd_PrimaryFire` sets on every
+        // committed shot and what the handler (`0x50bb90`) counts on, held through the window.
         for _ in 0..40 {
             rt.time += 1.0 / 30.0;
-            rt.last_shot.insert(1, rt.time);
+            *rt.ai_flags.entry(1).or_insert(0) |= 0x400;
             rt.ai_tick(0, 1.0 / 30.0);
         }
         assert!(
@@ -14658,12 +14786,16 @@ mod tests {
                  Follow 0.0, 0.5\n",
             ),
         );
-        // No `PrimaryFire` in the class, so nothing refreshes the shot: one shot at t = 0.
-        once.ai_flags.insert(1, 0xc00);
-        once.last_shot.insert(1, 0.0);
-        for _ in 0..40 {
+        // One committed shot sets `0x400` for a single pass; `sithAICmd_PrimaryFire` clears it
+        // again when its sight refresh returns 3 (`flags & !0x400`, `0x50a0f0`'s tail), so the
+        // accumulator never reaches the hold.
+        once.ai_flags.insert(1, 0x400);
+        for i in 0..40 {
             once.time += 1.0 / 30.0;
             once.ai_tick(0, 1.0 / 30.0);
+            if i == 0 {
+                once.ai_flags.insert(1, 0); // the shot's bit clears with the next sight pass
+            }
         }
         assert!(
             !once.ai_withdraw.contains_key(&1),
@@ -14697,6 +14829,63 @@ mod tests {
         assert!(
             !quiet.ai_withdraw.contains_key(&1),
             "an actor without `HitAndRun` broke off"
+        );
+    }
+
+    /// `sithAICmd_HitAndRun` (`0x50bb90`) from the decompiled arithmetic: each pass with the
+    /// just-fired bit `0x400` adds 1000 ms to the accumulator (`acc -= _DAT_005232f4` with the
+    /// constant **−1000.0**), the break-off lands on `fltArg[0] < acc` — so a 1000 ms hold breaks
+    /// on the **second** counted pass — and the pass after the break clears `0x800` (the
+    /// re-engage) once the handler's `now + fltArg[1]` re-arm comes due.
+    #[test]
+    fn hitandrun_counts_firing_seconds_then_re_engages() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        actor.yaw = 0.0;
+        let mut player = base.clone();
+        player.pos = [1.5, 0.0, 0.0];
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.template_speed.insert("tuskan".into(), 1.0);
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=180, sightdist=5.0\n\n\
+                 HitAndRun 1000.0, 3000.0\n",
+            ),
+        );
+        rt.ai_flags.insert(1, 0x400);
+
+        // Pass 1 (t = 1, the scheduler's first due clock): acc = 1000, and 1000 < 1000 is false.
+        rt.time = 1.0;
+        *rt.ai_flags.entry(1).or_insert(0) |= 0x400;
+        rt.ai_tick(0, 1.0 / 30.0);
+        assert!(
+            !rt.ai_withdraw.contains_key(&1),
+            "the first counted pass broke off early: hold 1000 must not be under acc 1000"
+        );
+
+        // Pass 2 (t = 2): acc = 2000 > 1000 — break off, `0x800` set, withdraw until t = 2 + 3.
+        rt.time = 2.0;
+        *rt.ai_flags.entry(1).or_insert(0) |= 0x400;
+        rt.ai_tick(0, 1.0 / 30.0);
+        assert!(rt.ai_withdraw.contains_key(&1), "the second counted pass did not break off");
+        assert_ne!(
+            rt.ai_flags.get(&1).copied().unwrap_or(0) & 0x800,
+            0,
+            "the break-off word does not carry 0x800"
+        );
+
+        // The pass after the re-arm (due at t = 5): `0x800` clears — the re-engage.
+        rt.time = 5.5;
+        rt.ai_tick(0, 1.0 / 30.0);
+        assert_eq!(
+            rt.ai_flags.get(&1).copied().unwrap_or(0) & 0x800,
+            0,
+            "the handler did not clear its break-off bit on the re-engage pass"
         );
     }
 
@@ -15251,9 +15440,8 @@ mod tests {
     /// `LobFire`'s **live** path (`0x509cd0`): its mask is `0x100` and that branch does not fire — it
     /// sets `sithPuppet_SetArmedMode(thing, (ai flags & 0x200) != 0)` and re-arms in 1000 ms. `0x200` is
     /// the awake bit `00_aisleep.cog` writes, so a wakeable ryther draws its weapon when it wakes and
-    /// holsters when it sleeps. The `param_4 == 0` branch, the one that calls `sithAI_FireWeapon` with a
-    /// lobbed chance, is dead content: the emit inventory raises only 1, `0x100`, `0x400`, `0x800`,
-    /// `0x1000` and the awareness sweep's event 2, so nothing ever delivers event 0 to it.
+    /// holsters when it sleeps. The scheduler branch (event 0) that fires the lobbed shot is
+    /// covered by `lobfire_fires_the_lob_and_arms_its_lockout`.
     #[test]
     fn lobfire_follows_the_awake_bit_instead_of_lobbing_a_shot() {
         let mut rt = door_runtime();
@@ -15296,6 +15484,99 @@ mod tests {
             "a sleeping actor with `LobFire` kept its weapon drawn"
         );
         assert_eq!(rt.shots_fired, 0, "the dead `sithAI_FireWeapon` branch lobbed a shot");
+    }
+
+    /// `FUN_00509cd0`'s scheduler branch, straight from the decompile: with the player in sight and
+    /// inside the class's band, `sithAI_FireWeapon` runs with `fl = 2` (the lob) and both the fire
+    /// lockout `ai + 0xa2` and the handler's re-arm land at `now + arg0` (2000 ms here); a player
+    /// outside the band refuses the shot, sets a look frame and retries in 500 ms; a `0x202`-flagged
+    /// player stops the fight with `(flags & 0xfffff9dd) | 4`.
+    #[test]
+    fn lobfire_fires_the_lob_and_arms_its_lockout() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut gunner = base.clone();
+        gunner.pos = [0.0, 0.0, 0.0];
+        gunner.yaw = 0.0;
+        let mut player = base.clone();
+        player.pos = [0.0, 1.0, 0.0];
+        player.flags = 0x4; // plainly visible: the detect roll is certain
+        rt.things = vec![player, gunner];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.template_weapon.insert("tuskan".into(), "+elaser".into());
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=180, sightdist=5.0\n\n\
+                 LobFire 2000.0, 0.8, 0.5, 4.0, 0.20, 0\n",
+            ),
+        );
+        rt.ai_flags.insert(1, 0x2); // the registry word: searching
+        rt.ai_detected.insert(1);
+        rt.time = 1.0;
+        rt.ai_tick(0, 1.0 / 30.0);
+        assert!(rt.shots_fired >= 1, "the scheduler branch did not lob its shot");
+        assert_eq!(
+            rt.ai_fire_lock.get(&1).copied(),
+            Some(3.0),
+            "the fire lockout `ai + 0xa2` is not armed at now + arg0"
+        );
+        assert_eq!(
+            rt.ai_inst.get(&1).and_then(|s| s.first().copied()),
+            Some(3.0),
+            "the handler's own re-arm is not now + arg0"
+        );
+        assert_ne!(
+            rt.ai_flags.get(&1).copied().unwrap_or(0) & 0x400,
+            0,
+            "the fired bit 0x400 was not set"
+        );
+
+        // Out of the band (6 units against maxD 4): the refusal path — a look frame, `0x400`,
+        // re-arm in 500 ms, no shot.
+        let mut far = door_runtime();
+        let base = far.things[0].clone();
+        let mut gunner = base.clone();
+        gunner.pos = [0.0, 0.0, 0.0];
+        gunner.yaw = 0.0;
+        let mut player = base.clone();
+        player.pos = [0.0, 6.0, 0.0];
+        player.flags = 0x4;
+        far.things = vec![player, gunner];
+        far.templates = vec!["walkplayer".into(), "tuskan".into()];
+        far.types = vec![10, 2];
+        far.template_weapon.insert("tuskan".into(), "+elaser".into());
+        far.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=180, sightdist=8.0\n\n\
+                 LobFire 2000.0, 0.8, 0.5, 4.0, 0.20, 0\n",
+            ),
+        );
+        far.ai_flags.insert(1, 0x2);
+        far.ai_detected.insert(1);
+        far.time = 1.0;
+        far.ai_tick(0, 1.0 / 30.0);
+        assert_eq!(far.shots_fired, 0, "a refusal still lobbed a shot");
+        assert_eq!(
+            far.ai_inst.get(&1).and_then(|s| s.first().copied()),
+            Some(1.5),
+            "a refused lob does not retry in 500 ms"
+        );
+        assert_ne!(far.ai_flags.get(&1).copied().unwrap_or(0) & 0x400, 0);
+
+        // A `0x202`-flagged player: the stop branch writes `(flags & 0xfffff9dd) | 4`.
+        rt.things[0].flags |= 0x202;
+        rt.ai_inst.get_mut(&1).unwrap()[0] = 0.0; // due now
+        rt.ai_next_due.remove(&1);
+        rt.ai_flags.insert(1, 0x406);
+        rt.ai_tick(0, 1.0 / 30.0);
+        assert_eq!(
+            rt.ai_flags.get(&1).copied(),
+            Some(0x4),
+            "a gone player did not stop the fight with (flags & 0xfffff9dd) | 4"
+        );
     }
 
     /// `jump` (`0x50abf0`): the only arm content can reach is event `0x400`, raised by the steering
