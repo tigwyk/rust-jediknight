@@ -826,7 +826,7 @@ pub struct Sweep {
     /// spends part of its distance there, so this — not `distance` — is what a caller can place a body by.
     pub point: [f32; 3],
     kind: u32,
-    thing: Option<ThingHit>,
+    pub thing: Option<ThingHit>,
 }
 
 #[derive(Clone, Copy)]
@@ -877,11 +877,16 @@ pub struct CollisionSearch {
     count: usize,
     sectors: [usize; 64],
     sector_count: usize,
+    excluded_thing: Option<usize>,
 }
 
 impl CollisionSearch {
     fn new() -> Self {
-        Self { records: [None; 128], count: 0, sectors: [0; 64], sector_count: 0 }
+        Self { records: [None; 128], count: 0, sectors: [0; 64], sector_count: 0, excluded_thing: None }
+    }
+
+    pub(crate) fn exclude_thing(&mut self, index: usize) {
+        self.excluded_thing = Some(index);
     }
 
     fn push(&mut self, record: CollisionRecord) {
@@ -1189,8 +1194,9 @@ impl LevelGeometry {
         search.sector_count = 0;
         search.add_sector(sector);
         let things = self.things();
+        let excluded = search.excluded_thing;
         if flags & 1 == 0 {
-            self.thing_contacts(&things, mover, start, dir, dist, radius, sector, flags, |_, hit| search.push(CollisionRecord::Solid(hit)));
+            self.thing_contacts(&things, mover, start, dir, dist, radius, sector, flags, excluded, |_, hit| search.push(CollisionRecord::Solid(hit)));
         }
         self.search_for_surface_collisions(sector, start, dir, dist, radius, gates, flags, search);
         let mut index = 0;
@@ -1198,7 +1204,7 @@ impl LevelGeometry {
             if let Some(CollisionRecord::Adjoin { distance, sector }) = search.records[index] {
                 if (flags & 0x400 != 0 || distance <= dist) && search.add_sector(sector) {
                     if flags & 1 == 0 {
-                        self.thing_contacts(&things, mover, start, dir, dist, radius, sector, flags, |_, hit| search.push(CollisionRecord::Solid(hit)));
+                        self.thing_contacts(&things, mover, start, dir, dist, radius, sector, flags, excluded, |_, hit| search.push(CollisionRecord::Solid(hit)));
                     }
                     self.search_for_surface_collisions(sector, start, dir, dist, radius, gates, flags, search);
                 }
@@ -1217,7 +1223,7 @@ impl LevelGeometry {
                     if adjoin_flags & ADJOIN_MOVE != 0 && things.iter().any(|thing| thing.sector == portal.adjoin)
                         && search.add_sector(portal.adjoin)
                     {
-                        self.thing_contacts(&things, mover, start, dir, dist, radius, portal.adjoin, flags, |_, hit| search.push(CollisionRecord::Solid(hit)));
+                        self.thing_contacts(&things, mover, start, dir, dist, radius, portal.adjoin, flags, excluded, |_, hit| search.push(CollisionRecord::Solid(hit)));
                     }
                 }
             }
@@ -1708,7 +1714,7 @@ impl LevelGeometry {
     ///   be non-zero; `flags & 0x80002` must be clear; `0x2000` needs type 7.
     /// - `0x4e8430:76-95` — with a mover, a thing must also pass the pair matrix, the `0x200`
     ///   mutual exclusion, the owner chain and the attach exclusion. The engine skips the mover
-    ///   itself (`puVar2 != puVar7`); the walker is not in the thing list, so identity holds.
+    ///   itself (`puVar2 != puVar7`); runtime movers set their index on the search.
     /// - `0x4e8430:37-75` — the record's kind is `hit | 1`; `Startup` installs no distance
     ///   predicates (`0x4e6d90`), so the hit distance survives unchanged.
     fn thing_contacts(
@@ -1721,6 +1727,7 @@ impl LevelGeometry {
         radius: f32,
         sector: usize,
         flags: u32,
+        excluded: Option<usize>,
         mut each: impl FnMut(&ThingSolid, Sweep),
     ) {
         let mut each = move |solid: &ThingSolid, mut hit: Sweep| {
@@ -1730,7 +1737,7 @@ impl LevelGeometry {
             each(solid, hit);
         };
         for thing in things.iter() {
-            if thing.sector != sector {
+            if thing.sector != sector || excluded == Some(thing.index) {
                 continue;
             }
             if flags & 8 != 0 && thing.thing_flags & 0x80 == 0 {
@@ -1799,6 +1806,7 @@ impl LevelGeometry {
             |state| self.inside_sector_with_gates(state.sector, state.pos, 0.0, gates),
             |_| {},
             |_, _| {},
+            |state, hit, crease| self.probe_contact(state, hit, crease),
         );
         *vel = state.vel;
         (state.pos, state.sector, distance)
@@ -1823,8 +1831,8 @@ impl LevelGeometry {
     ///   flag-`0x20` bodies) is elided: no ported body carries the flag.
     /// - `0x4e7950:156-196` — dispatch: a `0x20` crossing saves the position, messages a
     ///   flag-`2` surface and calls `SetSector` (`:165-185`), continuing only when the position
-    ///   changed; a thing or surface solid takes the slide answer (`sithCollision_HandleThingHitSurface`
-    ///   -> `0x4e9090`, `collide_hurt`) as continue/stop (`:158-163`); an item contact calls
+    ///   changed; a thing or surface solid takes its handler's answer as continue/stop
+    ///   (`:158-163`); an item contact calls
     ///   `0x4fbe10` at the advanced pose and answers 0.
     /// - `0x4e7950:206-236` — a clean round runs the whole distance and zeroes the remainder; a
     ///   stopped one renormalizes the remainder into the direction, snaps a `1e-5` (`0x52300c`)
@@ -1852,6 +1860,7 @@ impl LevelGeometry {
         mut contains: impl FnMut(&MoveState) -> bool,
         mut floor_tail: impl FnMut(&mut MoveState),
         mut touch_item: impl FnMut(&mut MoveState, usize),
+        mut solid_contact: impl FnMut(&mut MoveState, Sweep, &mut Option<[f32; 3]>) -> bool,
     ) -> f32 {
         let mut left = (delta[0] * delta[0] + delta[2] * delta[2] + delta[1] * delta[1]).sqrt();
         if left <= 0.0 { return 0.0; }
@@ -1914,7 +1923,7 @@ impl LevelGeometry {
                                 hit.normal, state.pos
                             );
                         }
-                        Self::collide_hurt(state, hit.normal, hit_distance, &mut crease)
+                        solid_contact(state, hit, &mut crease)
                     }
                     CollisionRecord::Adjoin { .. } => unreachable!(),
                 };
@@ -1966,6 +1975,12 @@ impl LevelGeometry {
         total
     }
 
+    /// Geometry-only sweeps have no runtime body or sound receiver; their contacts are immovable.
+    pub(crate) fn probe_contact(&self, state: &mut MoveState, hit: Sweep, crease: &mut Option<[f32; 3]>) -> bool {
+        let flags = if hit.thing.is_none() { self.surface_flags.get(hit.surface).copied().unwrap_or(0) } else { 0 };
+        Self::collide_hurt(state, hit.normal, hit.distance, crease, flags & 0x80 != 0, |_, _| {})
+    }
+
     /// `sithCollision_CollideHurt` (`0x4e9090`): the slide response a solid contact answers with,
     /// transliterated from `decomp/004e9090_sithCollision_CollideHurt.c` — same constants, same
     /// branches, same order.
@@ -1979,17 +1994,19 @@ impl LevelGeometry {
     /// per move, the port's `crease` argument.
     ///
     /// Constants read from the shipped image's `.rdata`: the approach epsilon is `0x52300c`
-    /// (1e-5); the hard-landing curve `(v - 2.5)^2 * 45` past a 1.0 floor is `0x523034`/`0x523038`/
-    /// `0x523014` — the same curve `sithCollision_FallHurt` (`0x4e9550`) applies, and the port
-    /// charges it at the landing path (`fall_damage` on the attach), so that inline branch is a
-    /// deviation-ledger row rather than code here; the movement below is the engine's own.
+    /// (1e-5); the collision charge uses the same curve and cutoff (`0x523034`, `0x523038`,
+    /// `0x523014`) as `sithCollision_FallHurt` (`0x4e9550`), but runs here before updating the
+    /// remainder. The damage gate suppresses it when set.
     ///
     /// A fresh face (`distance != 0`, or no crease yet) stores the normal and cancels the
     /// into-normal components of velocity and remainder scaled by 1.0001 — 1.9 under physflag
     /// `0x20` — preserving the tangential component exactly. A second face met at distance 0
     /// cancels plainly (no restitution), folds the stored crease against the new face
     /// (`rdVector_Normalize3Acc` `0x449b97`), and cancels into that crease too.
-    fn collide_hurt(state: &mut MoveState, n: [f32; 3], distance: f32, crease: &mut Option<[f32; 3]>) -> bool {
+    pub(crate) fn collide_hurt(
+        state: &mut MoveState, n: [f32; 3], distance: f32, crease: &mut Option<[f32; 3]>, suppress_charge: bool,
+        charge: impl FnOnce(&mut MoveState, f32),
+    ) -> bool {
         if state.move_type != 1 {
             return false;
         }
@@ -2009,6 +2026,12 @@ impl LevelGeometry {
                 let m = restitution * v_into;
                 for k in 0..3 {
                     state.vel[k] = n[k] * m + state.vel[k];
+                }
+                if !suppress_charge {
+                    let damage = crate::fall_damage(v_into);
+                    if damage > 0.0 {
+                        charge(state, damage);
+                    }
                 }
             }
             let m = restitution * into;
@@ -2221,6 +2244,7 @@ impl LevelGeometry {
             |state| self.inside_sector_with_gates(state.sector, state.pos, 0.0, gates),
             |state| { landed = self.finish_body(state, radius, height, gates); },
             |_, _| {},
+            |state, hit, crease| self.probe_contact(state, hit, crease),
         );
         *pos = state.pos;
         *sector = state.sector;
@@ -2253,10 +2277,8 @@ impl LevelGeometry {
     /// exercises: the attached move's normal rules and the seat hold.
     ///
     /// Elided with citations (no ported body reaches them):
-    /// - the attached drag (`:186-208`, `sithPhysics_ApplyDrag` `0x4f5d50` on the velocity at
-    ///   `surfdrag * friction` a step): the walk integration already drags the horizontal axes
-    ///   (`integrate_walk`), so only a vertical residue can persist — bounded by the tail gate's
-    ///   [-2.0, 0.2] landing-speed window and cancelled at the next surface contact;
+    /// - attached drag (`:186-208`, `sithPhysics_ApplyDrag` `0x4f5d50`) is still handled by
+    ///   `integrate_walk`; the normal component is now removed from persistent velocity here;
     /// - the look and orientation halves (`:43-93`, physflags 0x100/0x1000/0x8000) and the
     ///   angular integration (`:94-179`): the port's things carry no attached angular state;
     /// - the walk-thrust arm (`:209-246`, physflag 0x2): the port's walk integration is
@@ -2272,8 +2294,8 @@ impl LevelGeometry {
     /// - the player's slope pull (`:428-438`): kind 10 with physflag 1, a tilted floor, and
     ///   either a slippery one (friction < 0.8) or a moving body decelerates `vel.z` by
     ///   `gravity * dt * clamp(1 - friction, 0.2, 0.8)` (`0x5231bc`/`0x5231c8`);
-    /// - the move is the velocity (`:422-427`), its along-normal component is removed
-    ///   (`:439-455`) and tiny components snap to zero (`0x52319c` = 1e-5, `:456-485`);
+    /// - remove the velocity's along-normal component in place (`:439-455`), snap tiny velocity
+    ///   components (`0x52319c` = 1e-5, `:456-485`), then assemble the move (`:486-489`);
     /// - the hold (`:491-535`): the rest is `GetThingHeight` — a ceiling attach under physflag
     ///   `0x10000` rests at `radius + 0.01` measured along the normal's rise (`0x5231cc` =
     ///   −0.01) instead — and an error past 1e-5 is corrected into the move by at most
@@ -2294,15 +2316,16 @@ impl LevelGeometry {
         {
             state.vel[2] -= gravity * dt * (1.0 - a.friction).clamp(0.2, 0.8);
         }
-        let mut mv = state.vel;
-        let into = dot(mv, n);
+        let into = state.vel[2] * n[2] + state.vel[1] * n[1] + state.vel[0] * n[0];
         if into.abs() > 1e-5 {
-            mv = [mv[0] - n[0] * into, mv[1] - n[1] * into, mv[2] - n[2] * into];
+            for (v, normal) in state.vel.iter_mut().zip(n) {
+                *v += normal * -into;
+            }
         }
-        for v in mv.iter_mut() {
+        for v in &mut state.vel {
             if v.abs() <= 1e-5 { *v = 0.0; }
         }
-        let mut delta = [mv[0] * dt, mv[1] * dt, mv[2] * dt];
+        let mut delta = state.vel.map(|v| v * dt);
         let error = if state.phys_flags & 0x10000 == 0 {
             d - height
         } else {
@@ -3433,6 +3456,7 @@ mod tests {
                 |state, item| {
                     assert!(contact.replace((item, state.pos)).is_none());
                 },
+                |state, hit, crease| solids.probe_contact(state, hit, crease),
             );
             assert_eq!(travel, dx, "an item did not obstruct the sweep");
             assert_eq!(state.pos, [dx, 0.0, 0.0]);
@@ -5308,15 +5332,14 @@ mod tests {
 
     const FLAT: Attach = Attach { normal: [0.0, 0.0, 1.0], point: [0.0, 0.0, -1.0], surface: Some(0), thing: None, friction: 1.0 };
 
-    /// `0x4f7430`: the hold moves an attached body toward `GetThingHeight` by at most `0.5 * dt`
-    /// (`0x523198`) a step, and the *move* loses its component along the floor normal
-    /// (`:439-455`) — the velocity field itself keeps it, as in the engine.
+    /// `0x4f7430:439-491`: the velocity loses its normal component before the move is
+    /// assembled, and the separate seat correction is clamped to `0.5 * dt` (`0x523198`).
     #[test]
-    fn the_attached_hold_is_clamped_and_the_move_projected() {
+    fn the_attached_hold_is_clamped_and_velocity_stays_projected() {
         let solids = room();
         let (mut sector, mut pos, mut vel, mut attach) = (0usize, [0.0f32, 0.0, -0.5], [1.0f32, 0.0, -3.0], Some(FLAT));
         solids.step_body(Gates::default(), &mut sector, &mut pos, &mut vel, &mut attach, 0.02, 0.065, 0.12, 4.0);
-        assert_eq!(vel, [1.0, 0.0, -3.0], "the engine never projects the velocity field itself");
+        assert_eq!(vel, [1.0, 0.0, 0.0]);
         assert!((pos[2] - (-0.5 - 0.01)).abs() < 1e-6, "the hold moved {} in one 0.02 step, not 0.01", -0.5 - pos[2]);
         assert!((pos[0] - 0.02).abs() < 1e-6, "the walk moved {}", pos[0]);
         // Within one step's clamp, the hold lands on the height exactly.
@@ -5498,6 +5521,7 @@ mod tests {
             |state| solids.inside_sector_with_gates(state.sector, state.pos, 0.0, Gates::default()),
             |_| {},
             |_, _| {},
+            |state, hit, crease| solids.probe_contact(state, hit, crease),
         );
         assert_eq!(state.pos, [0.0, -1.0, 0.5]);
         assert_eq!(traveled, 4.0);
@@ -5532,6 +5556,7 @@ mod tests {
             |_| true,
             |_| {},
             |_, _| {},
+            |state, hit, crease| solids.probe_contact(state, hit, crease),
         );
         assert_eq!(state.sector, 7, "the nearer crossing was consumed before the solid");
         assert!(
@@ -5560,6 +5585,7 @@ mod tests {
             |_| false,
             |_| {},
             |_, _| {},
+            |state, hit, crease| solids.probe_contact(state, hit, crease),
         );
         assert_eq!(traveled, 2.0, "the move completed before the tail undid the pose");
         assert_eq!(state.pos, [0.0, -1.0, 0.5]);
@@ -5586,6 +5612,7 @@ mod tests {
                 |_| true,
                 |_| { ran = true; },
                 |_, _| {},
+                |state, hit, crease| solids.probe_contact(state, hit, crease),
             );
             ran
         };
@@ -5666,7 +5693,7 @@ mod tests {
             pos: [0.0; 3], sector: 0, vel: [-1.0, 0.0, 0.0], remainder: [-1.0, 0.0, 0.0],
             phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, water_surface: None, owner: None,
         };
-        assert!(Solids::collide_hurt(&mut state, [1.0, 1e-7, 0.0], 0.0, &mut Some([1.0, 0.0, 0.0])));
+        assert!(Solids::collide_hurt(&mut state, [1.0, 1e-7, 0.0], 0.0, &mut Some([1.0, 0.0, 0.0]), false, |_, _| {}));
         assert_eq!(state.vel, [0.0; 3]);
         assert_eq!(state.remainder, [0.0; 3]);
     }
@@ -5683,7 +5710,7 @@ mod tests {
         };
         let mut crease = None;
         // A west wall's normal points east, into the room; the body moves north-west into it.
-        assert!(Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.5, &mut crease));
+        assert!(Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.5, &mut crease, false, |_, _| {}));
         assert_eq!(crease, Some([1.0, 0.0, 0.0]), "the fresh face stores the crease normal");
         assert_eq!(state.vel[1], 0.5, "the tangential velocity component is untouched");
         assert_eq!(state.remainder[1], 0.5, "the tangential remainder component is untouched");
@@ -5701,7 +5728,7 @@ mod tests {
             pos: [0.0; 3], sector: 0, vel: [-1.0, 0.5, 0.0], remainder: [-1.0, 0.0, 0.0],
             phys_flags: 0x20, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, water_surface: None, owner: None,
         };
-        assert!(Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.5, &mut None));
+        assert!(Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.5, &mut None, false, |_, _| {}));
         assert!((state.vel[0] - 0.9).abs() < 1e-6, "1.9 * 1 - 1 reflected: {}", state.vel[0]);
         assert!((state.remainder[0] - 0.9).abs() < 1e-6, "{}", state.remainder[0]);
         assert_eq!(state.vel[1], 0.5, "even the bounce keeps the tangential component");
@@ -5719,12 +5746,12 @@ mod tests {
             phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, water_surface: None, owner: None,
         };
         let mut crease = None;
-        assert!(Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.25, &mut crease));
+        assert!(Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.25, &mut crease, false, |_, _| {}));
         assert!((state.remainder[0] - 0.0001).abs() < 1e-6, "{}", state.remainder[0]);
         assert_eq!(state.remainder[1], -1.0);
 
         let diag = std::f32::consts::FRAC_1_SQRT_2;
-        assert!(Solids::collide_hurt(&mut state, [diag, diag, 0.0], 0.0, &mut crease));
+        assert!(Solids::collide_hurt(&mut state, [diag, diag, 0.0], 0.0, &mut crease, false, |_, _| {}));
         let folded = crease.unwrap();
         assert!((folded[0] - diag).abs() < 1e-6, "the fold is normalize([0.5, -0.5, 0]): {}", folded[0]);
         assert!((folded[1] + diag).abs() < 1e-6, "{}", folded[1]);
@@ -5750,10 +5777,10 @@ mod tests {
             phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, water_surface: None, owner: None,
         };
         let mut crease = None;
-        assert!(Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.25, &mut crease));
+        assert!(Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.25, &mut crease, false, |_, _| {}));
         // The first slide left the remainder at [0.0001, -1, 0]; the second face still has an
         // approach of 1 along its normal, so the fresh branch runs with restitution.
-        assert!(Solids::collide_hurt(&mut state, [0.0, 1.0, 0.0], 0.5, &mut crease));
+        assert!(Solids::collide_hurt(&mut state, [0.0, 1.0, 0.0], 0.5, &mut crease, false, |_, _| {}));
         assert_eq!(crease, Some([0.0, 1.0, 0.0]), "the fresh branch replaced the stored normal");
         assert!((state.remainder[0] - 0.0001).abs() < 1e-6, "{}", state.remainder[0]);
         // The crease branch would cancel exactly (leaving 0); restitution leaves 0.0001.
@@ -5770,17 +5797,17 @@ mod tests {
             phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, water_surface: None, owner: None,
         };
         let mut crease = None;
-        assert!(!Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.5, &mut crease));
+        assert!(!Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.5, &mut crease, false, |_, _| {}));
         assert_eq!(crease, None);
         assert_eq!(state.remainder, [-5e-6, 1.0, 0.0], "the state is untouched");
         assert_eq!(state.vel, [-1.0, 0.0, 0.0]);
 
         state.remainder = [1.0, 0.0, 0.0];
-        assert!(!Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.5, &mut crease), "moving away");
+        assert!(!Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.5, &mut crease, false, |_, _| {}), "moving away");
 
         state.remainder = [-1.0, 0.0, 0.0];
         state.move_type = 0;
-        assert!(!Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.5, &mut crease), "not a physics mover");
+        assert!(!Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.5, &mut crease, false, |_, _| {}), "not a physics mover");
     }
 
     #[test]
