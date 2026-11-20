@@ -3480,6 +3480,136 @@ mod tests {
         assert_eq!(state.touched, vec![3], "the contact is recorded for the touch gate");
     }
 
+    /// A walker-shaped mover for the admission tests: type 10, no owner, not attached.
+    fn walker() -> MoveState {
+        MoveState {
+            pos: [0.0, 0.0, 0.0], sector: 0, vel: [0.0; 3], remainder: [1.0, 0.0, 0.0],
+            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0,
+            attach: None, attach_flags: 0, touched: Vec::new(), water_surface: None, owner: None,
+        }
+    }
+
+    /// One sphere thing mid-room, with the admission words the case under test needs.
+    fn gate_thing(kind: u32, thing_flags: u32) -> ThingSolid {
+        ThingSolid {
+            index: 4,
+            centre: [1.0, 0.0, 0.0],
+            origin: [1.0, 0.0, 0.0],
+            radius: 0.1,
+            z_min: -0.1,
+            z_max: 0.1,
+            sector: 0,
+            half: None,
+            yaw: 0.0,
+            mesh: None,
+            thing_flags,
+            collide: 1,
+            owner: None,
+            kind,
+            item: false,
+        }
+    }
+
+    /// The contacts a mover's own search records (`0x4e8430` with `param_2` set).
+    fn mover_contacts(solids: &Solids, mover: &MoveState, flags: u32) -> Vec<Sweep> {
+        let mut search = CollisionSearch::new();
+        solids.search_for_collisions(
+            0, Some(mover), [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], 1.0, 0.065,
+            Gates::default(), flags, &mut search,
+        );
+        let mut hits = Vec::new();
+        while let Some(CollisionRecord::Solid(hit)) = search.pop() {
+            if hit.thing.is_some() {
+                hits.push(hit);
+            }
+        }
+        hits
+    }
+
+    /// `0x4e6d90`'s pair matrix admits the walker against cog furniture (7) and an actor (2),
+    /// but nothing against a camera (1): `DAT_00847f38[mover*12 + hit]` is zero there.
+    #[test]
+    fn the_pair_matrix_gates_the_movers_thing_search() {
+        let solids = boxed();
+        solids.set_things(vec![gate_thing(7, 0)]);
+        assert_eq!(mover_contacts(&solids, &walker(), 0).len(), 1, "cog furniture meets the walker");
+        solids.set_things(vec![gate_thing(2, 0)]);
+        assert_eq!(mover_contacts(&solids, &walker(), 0).len(), 1, "an actor meets the walker (LAB_004ed210)");
+        solids.set_things(vec![gate_thing(1, 0)]);
+        assert!(mover_contacts(&solids, &walker(), 0).is_empty(), "a camera has no pair cell");
+        // A mover-less search (FindFloor's mover=0) admits the camera all the same.
+        let mut search = CollisionSearch::new();
+        solids.search_for_collisions(
+            0, None, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], 1.0, 0.065, Gates::default(), 0, &mut search,
+        );
+        assert!(search.pop().is_some(), "mover 0 records any admitted intersecting thing");
+    }
+
+    /// `0x4e8430:78` — either side carrying thingflag `0x200` ends the pair.
+    #[test]
+    fn thingflag_0x200_mutually_excludes_the_pair() {
+        let solids = boxed();
+        solids.set_things(vec![gate_thing(7, 0x200)]);
+        assert!(mover_contacts(&solids, &walker(), 0).is_empty(), "a 0x200 thing is untouchable");
+        solids.set_things(vec![gate_thing(7, 0)]);
+        let mut mover = walker();
+        mover.flags = 0x200;
+        assert!(mover_contacts(&solids, &mover, 0).is_empty(), "a 0x200 mover touches nothing");
+    }
+
+    /// `0x4e8430:79-88` — a weapon thing skips the hit that shares its owner (`+0x80`).
+    #[test]
+    fn the_owner_chain_excludes_a_weapons_own_side() {
+        let solids = boxed();
+        let mut hit = gate_thing(7, 0);
+        hit.owner = Some(9);
+        solids.set_things(vec![hit]);
+        let mut mover = walker();
+        mover.kind = 3;
+        mover.owner = Some(9);
+        assert!(mover_contacts(&solids, &mover, 0).is_empty(), "same owner, no contact");
+        mover.owner = Some(8);
+        assert_eq!(mover_contacts(&solids, &mover, 0).len(), 1, "a stranger's thing still meets the bolt");
+    }
+
+    /// `0x4e8430:89-94` — a mover attached to the very thing is skipped while its attach flags
+    /// carry `8` (or the search carries `0x40`).
+    #[test]
+    fn an_attached_mover_skips_the_thing_it_rides() {
+        let solids = boxed();
+        let hit = gate_thing(7, 0);
+        let index = hit.index;
+        solids.set_things(vec![hit]);
+        let mut mover = walker();
+        mover.attach_flags = 6;
+        mover.attach = Some(Attach {
+            normal: [0.0, 0.0, 1.0],
+            point: [0.0, 0.0, 0.0],
+            surface: None,
+            thing: Some(ThingHit { thing: index, mesh_face: None, item: false }),
+            friction: 1.0,
+        });
+        assert_eq!(mover_contacts(&solids, &mover, 0).len(), 1, "attach flag 8 clear and no search 0x40: the pair survives");
+        mover.attach_flags = 0xe;
+        assert!(mover_contacts(&solids, &mover, 0).is_empty(), "attach flag 8 skips the ridden thing");
+        mover.attach_flags = 6;
+        assert!(mover_contacts(&solids, &mover, 0x40).is_empty(), "search flag 0x40 skips it too");
+    }
+
+    /// `0x4e8430:33-36` — the search-flag and thingflag admission words.
+    #[test]
+    fn the_search_flags_admit_on_the_thingflags_word() {
+        let solids = boxed();
+        solids.set_things(vec![gate_thing(7, 0)]);
+        assert!(mover_contacts(&solids, &walker(), 8).is_empty(), "flag 8 needs thingflag 0x80");
+        assert!(mover_contacts(&solids, &walker(), 0x10).is_empty(), "flag 0x10 needs thingflag 0x40");
+        assert!(mover_contacts(&solids, &walker(), 0x2000).len() == 1, "flag 0x2000 admits type 7");
+        solids.set_things(vec![gate_thing(5, 0)]);
+        assert!(mover_contacts(&solids, &walker(), 0x2000).is_empty(), "flag 0x2000 refuses an item");
+        solids.set_things(vec![gate_thing(7, 0x80002)]);
+        assert!(mover_contacts(&solids, &walker(), 0).is_empty(), "thingflags 0x80002 is never admitted");
+    }
+
     /// `0x4fbe10`'s `HasLOS(item, player)` (`0x4e7500`): surfaces and cog-type things block, an
     /// item does not.
     #[test]
