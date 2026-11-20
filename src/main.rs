@@ -10487,7 +10487,7 @@ fn main() {
             ],
         );
         let rate = rt.surfaces[index].slide;
-        assert_eq!(rate, [0.0, -1.0], "SlideWall did not scale and negate its vector");
+        assert_eq!(rate, [0.0, -1.0, 0.0], "SlideWall did not scale and negate its vector");
         let epoch = rt.surface_epoch;
         let scrolls = rt.scroll_epoch;
         // A second of clock must both move the texture and carry a body: the offset from the clock is
@@ -12210,7 +12210,10 @@ fn main() {
         let mut pos = [start.pos[0], start.pos[1], start.pos[2] + 0.5];
         let mut vel = [0.0f32; 3];
         let mut attach = None;
-        let height = runtime::template_insert("walkplayer")[2].max(rules.radius + 0.005);
+        let height = collide::get_thing_height(
+            world.level.template_f32("walkplayer", "height").unwrap_or(0.0),
+            runtime::template_insert("walkplayer")[2], rules.radius,
+        );
         let dt = 1.0 / 30.0;
         for _ in 0..60 {
             solids.step_body(collide::Gates::default(), &mut sector, &mut pos, &mut vel, &mut attach, dt, rules.radius, height, rules.gravity);
@@ -12649,7 +12652,10 @@ fn main() {
             let mut pos = player.pos;
             let mut vel = [0.0f32; 3];
             let mut attach = None;
-            let height = runtime::template_insert("walkplayer")[2].max(rules.radius + 0.005);
+            let height = collide::get_thing_height(
+                world.level.template_f32("walkplayer", "height").unwrap_or(0.0),
+                runtime::template_insert("walkplayer")[2], rules.radius,
+            );
             // Settle on the floor first: the thing's origin is at the level's walkplayer
             // point, which is not necessarily a radius above the floor.
             for _ in 0..30 {
@@ -20497,29 +20503,6 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
             .collect(),
     );
 
-    // A solid thing's own model is a collider: `sithCollision` treats a thing's surfaces as solid for
-    // every body, which is how a body stands on a catwalk slab, a crate or a lift platform. The surface
-    // sweep only knows the level's faces, so the loader hands the runtime each **solid** template's
-    // model top and footprint (`solid_radius` is the engine's `collide=` rule). Model space is world
-    // space here — the mesh is drawn at the thing's position with its own coordinates.
-    runtime::set_template_floors(
-        template_model
-            .iter()
-            .filter(|(template, _)| runtime::solid_radius(&level, template).is_some())
-            .filter_map(|(template, model)| {
-                let model = models.get(model)?;
-                let pose = tdo::pose_nodes(model, None, 0.0);
-                let (lo, hi) = bounds(model, &pose);
-                (hi[2] > lo[2]).then(|| {
-                    (
-                        template.clone(),
-                        (hi[2], lo[0].abs().max(hi[0].abs()), lo[1].abs().max(hi[1].abs())),
-                    )
-                })
-            })
-            .collect(),
-    );
-
     Ok(World {
         palette: <[[u8; 3]; 256]>::try_from(palette.0).unwrap_or([[0u8; 3]; 256]),
         level,
@@ -26500,14 +26483,17 @@ impl SolidShapes {
             .iter()
             .enumerate()
             .map(|(i, thing)| {
+                if thing.destroyed { return None; }
                 let name = templates.get(i).map(|t| t.to_ascii_lowercase());
                 let is_placement = i < self.placement_templates.len()
                     && name.as_deref() == Some(self.placement_templates[i].as_str());
-                if is_placement {
+                let mut shape = if is_placement {
                     self.placements[i].clone()
                 } else {
                     name.and_then(|n| self.by_template.get(&n)).cloned().flatten()
-                }
+                }?;
+                shape.thing_flags = thing.flags;
+                Some(shape)
             })
             .collect();
         solid_things_at(
@@ -29203,6 +29189,7 @@ fn setup(
             pitch: 0.0,
             eye: eye_height,
             attach: None,
+            floor_anchor: None,
             water_surface: None,
             published_vel: [0.0; 3],
             published_pose: Some(([start[0], start[1], start[2] + eye_height], sector)),

@@ -484,24 +484,6 @@ fn vec_param(raw: Option<&str>) -> Option<[f32; 3]> {
     Some([x, y, z])
 }
 
-/// Per solid template, the **top and footprint** of the model it draws: `(top_offset, half_x, half_y)`
-/// in model space, which is world space here. Resting floors come from the collider's own solid
-/// things ([`crate::collide::LevelGeometry::resting_floor`]); this table is only what
-/// `Runtime::elevator_floor` needs to carry a body on a rising lift.
-static TEMPLATE_FLOORS: std::sync::OnceLock<BTreeMap<String, (f32, f32, f32)>> =
-    std::sync::OnceLock::new();
-
-/// Register the solid templates' model tops. Called once by the loader; a later call is ignored.
-pub fn set_template_floors(map: BTreeMap<String, (f32, f32, f32)>) {
-    let _ = TEMPLATE_FLOORS.set(map);
-}
-
-fn template_floor(template: &str) -> Option<(f32, f32, f32)> {
-    TEMPLATE_FLOORS
-        .get()?
-        .get(&template.to_ascii_lowercase())
-        .copied()
-}
 
 /// The radius a placed thing's **collision volume** has, from the engine's own template rule.
 ///
@@ -561,7 +543,7 @@ pub struct SurfaceState {
     pub center: [f32; 3],
     pub cel: f32,
     pub anim: f32,
-    pub slide: [f32; 2],
+    pub slide: [f32; 3],
     /// When the next cel is due, on the runtime's clock — the engine's `rdSurface.field_30`.
     pub next: f32,
     /// `SurfaceLightAnim`'s extra light, added to the level's baked intensity: `start` when the ramp
@@ -1113,6 +1095,8 @@ pub struct PlayerBody {
     /// What the body is attached to (`sithPhysics_FindFloor`, `0x4f5550`); `None` while it falls or
     /// swims. The attached update holds the body `GetThingHeight` above it.
     pub attach: Option<crate::collide::Attach>,
+    /// `0x4ce050:71-74`: the rider's origin in the attached parent's local frame.
+    pub floor_anchor: Option<(usize, [f32; 3])>,
     /// Physflag `0x100000` and `thing+0x48`: how far below a dry sector's adjoin the body's centre is,
     /// while that adjoin is within `sithPhysics_FindFloor`'s 0.05 upward search (`0x4f5550`).
     pub water_surface: Option<f32>,
@@ -1145,6 +1129,7 @@ impl Default for PlayerBody {
             pitch: 0.0,
             eye: crate::PLAYER_EYE,
             attach: None,
+            floor_anchor: None,
             water_surface: None,
             published_vel: [0.0; 3],
             published_pose: None,
@@ -1506,6 +1491,7 @@ pub struct Runtime {
     /// returns), with the height the shipped models imply (2.8 x the radius; actor models measure
     /// 2.7-2.8). Separate from `template_body`, which the explosion pass uses.
     pub template_hit: BTreeMap<String, (f32, f32)>,
+    template_height: BTreeMap<String, f32>,
     pub template_rate: BTreeMap<String, f32>,
     pub template_decay: std::collections::BTreeSet<String>,
     /// Templates whose `typeflags` carry `SITHEXPLOSION_FLAG_ANIMATED_SPRITE` (`0x1`), the bit
@@ -1944,16 +1930,6 @@ pub struct Runtime {
     /// What the scripts actually changed, for the run report.
     pub adjoins_changes: usize,
     pub things_moved: usize,
-}
-
-/// One attach transition queued for the `entered` drain: the thing's surface before and after the
-/// tick's attach, its flags word, and the thing itself. The send happens after the collider borrow
-/// drops, exactly as the engine's queued bus delivers it.
-struct AttachEntered {
-    prev: Option<usize>,
-    now: Option<usize>,
-    flags: u32,
-    sender: usize,
 }
 
 /// `sithAI_FireWeapon` (`0x4eba10`) outcome. `Deferred` is the engine's own "return 1" for a
@@ -2504,6 +2480,9 @@ impl Runtime {
                 .collect(),
             template_body,
             template_hit,
+            template_height: level.templates.iter().filter_map(|t| {
+                level.template_f32(&t.name, "height").map(|height| (t.name.to_ascii_lowercase(), height))
+            }).collect(),
             template_explode,
             template_fire_offset,
             template_timer,
@@ -2678,7 +2657,7 @@ impl Runtime {
                     } else {
                         [0.0; 3]
                     };
-                    SurfaceState { center, cel: 0.0, anim: 0.0, slide: [0.0; 2], next: 0.0, light: 0.0, light_end: 0.0, light_rate: 0.0 }
+                    SurfaceState { center, cel: 0.0, anim: 0.0, slide: [0.0; 3], next: 0.0, light: 0.0, light_end: 0.0, light_rate: 0.0 }
                 })
                 .collect(),
             surface_flags: level.surfaces.iter().map(|s| s.surfflags).collect(),
@@ -2949,7 +2928,7 @@ impl Runtime {
     /// have to be rebuilt for it: the offset is a pure function of the clock (`slide * time`), so
     /// [`Self::scroll_epoch`] moves with the frame and the renderer re-lays that subset.
     fn bump_scroll_epoch(&mut self) {
-        if !self.surfaces.iter().any(|s| s.slide != [0.0; 2])
+        if !self.surfaces.iter().any(|s| s.slide != [0.0; 3])
             && self.sky_scroll.iter().all(|rate| *rate == [0.0; 2])
         {
             return;
@@ -3402,8 +3381,8 @@ impl Runtime {
         // load (`FindFloor(thing, 1)`, the forced reach), so an actor keeps the level's authored
         // height instead of sagging to its sphere contact first. The pass runs once, on the first
         // step that has a collider.
-        let mut creation_entered: Vec<AttachEntered> = Vec::new();
-        let seat_geometry = geometry.or(self.solids.as_deref());
+        let cached_geometry = self.solids.clone();
+        let seat_geometry = geometry.or(cached_geometry.as_deref());
         let mut seated_load = false;
         if !self.seated_load && let Some(solids) = seat_geometry {
             seated_load = true;
@@ -3419,7 +3398,7 @@ impl Runtime {
                 }
                 let t = &self.things[i];
                 let radius = body_radius[i];
-                let height = t.insert[2].max(radius + 0.005);
+                let height = self.thing_height(Some(i), radius);
                 let Some(sector) = usize::try_from(t.sector)
                     .ok()
                     .filter(|sector| *sector < solids.sectors.len())
@@ -3433,35 +3412,27 @@ impl Runtime {
                     move_type: 1, collide: 1, flags: t.flags, attach: t.floor_attach,
                     attach_flags: t.attach_flags, touched: Vec::new(), water_surface: None, owner: None,
                 };
-                let prev_surface = state.attach.and_then(|a| a.surface);
-                solids.find_floor(
-                    &mut state, radius, height,
-                    Gates { sectors: &self.sector_flags, adjoins: &self.adjoin_flags },
-                    true,
-                );
-                self.things[i].floor_attach = state.attach;
-                // The creation attach messages too (`AttachThingToSurface` sends regardless of
-                // its no-landing-effects flag). The collider is borrowed through the seat build
-                // below; the send is drained with the per-tick transitions after it, and
-                // `sith_thing_attach_thing_to_surface` itself stays silent when the surface did
-                // not change.
-                creation_entered.push(AttachEntered {
-                    prev: prev_surface,
-                    now: state.attach.and_then(|a| a.surface),
-                    flags: self.things[i].flags,
-                    sender: i,
-                });
+                let previous = state.attach;
+                solids.find_floor_for(&mut state, radius, height, self.gates(), true, Some(i), self.thing_up(i));
+                self.floor_transition(&mut state, previous, Some(i), true);
+                let anchor = state.attach.and_then(|a| a.thing)
+                    .and_then(|target| self.floor_local_anchor(target.thing, state.pos));
+                let thing = &mut self.things[i];
+                thing.floor_attach = state.attach;
+                thing.attach_flags = state.attach_flags;
+                thing.phys_flags = state.phys_flags;
+                thing.vel = state.vel;
+                if let Some(anchor) = anchor { thing.attach_offset = anchor; }
             }
         }
         // Latch, never reset: the load-time attach is once (`sithThing_Initialize`). Assigning
         // the per-tick flag here cleared it every other tick and re-ran the creation attach.
         self.seated_load |= seated_load;
-        // The seat itself, per tick, sampled before the mutable iteration because the swept move
-        // borrows the collider. Each entry is the body's whole tick move: (sector, pos, vel,
-        // floor attach, horizontal travel, whether the sector changed).
-        let mut seat: Vec<Option<(usize, [f32; 3], [f32; 3], Option<crate::collide::Attach>, f32, bool)>> =
-            (0..self.things.len())
-                .map(|i| {
+        // A projectile that dies on geometry is a miss in the encounter chronology.
+        let mut lost_shots: Vec<usize> = Vec::new();
+        for i in 0..self.things.len() {
+            // Resolve the body's hold and floor search before its path or rotation advances.
+            let seat = (|| {
                     if Some(i) == player_at
                         || !matches!(self.types.get(i).copied(), Some(2) | Some(3))
                         || self.things[i].phys_flags & 0x1 == 0
@@ -3474,13 +3445,14 @@ impl Runtime {
                     let solids = seat_geometry?;
                     let t = &self.things[i];
                     let radius = body_radius[i];
-                    let height = t.insert[2].max(radius + 0.005);
-                    let mut sector = usize::try_from(t.sector)
+                    let height = self.thing_height(Some(i), radius);
+                    let sector = usize::try_from(t.sector)
                         .ok()
                         .filter(|sector| *sector < solids.sectors.len())
                         .or_else(|| solids.sector_at(t.pos, 0.1))?;
-                    let mut pos = t.pos;
+                    let pos = t.pos;
                     let mut vel = t.vel;
+                    let previous = t.floor_attach;
                     // `sithPhysics_UpdateThingPhysics`'s thrust arm (`0x4f6270`): `thrust * dt`
                     // joins the velocity before the move, and a body whose physflags carry
                     // `0x400000` (`_powerup`) is exempt — which is why m5's weapon pickups stay
@@ -3493,26 +3465,48 @@ impl Runtime {
                             vel[k] += drive[k] * dt;
                         }
                     }
-                    let mut attach = t.floor_attach;
-                    let gravity = if t.phys_flags & 0x40000 != 0 { self.gravity * 0.5 } else { self.gravity };
-                    let (flat, crossed, _) = solids.step_body(
-                        Gates { sectors: &self.sector_flags, adjoins: &self.adjoin_flags },
-                        &mut sector, &mut pos, &mut vel, &mut attach, dt, radius, height, gravity,
-                    );
-                    if std::env::var_os("BK_SEAT_TRACE").is_some() {
-                        eprintln!("seat: thing {i} z {:.4} vz {:.4} attach {}", pos[2], vel[2], attach.is_some());
+                    let mut state = crate::collide::MoveState {
+                        pos, sector, vel, remainder: [0.0; 3], phys_flags: t.phys_flags,
+                        kind: self.types[i] as u32, move_type: 1,
+                        collide: self.template_collide.get(&self.templates[i]).copied().unwrap_or(1),
+                        flags: t.flags, attach_flags: t.attach_flags, attach: previous,
+                        owner: t.owner, water_surface: None, touched: Vec::new(),
+                    };
+                    if let Some(attach) = previous.filter(|a| a.thing.is_some()) {
+                        if let Some((attach, carry)) = self.floor_rider_motion(solids, attach, pos, Some(t.attach_offset)) {
+                            state.attach = Some(attach);
+                            if state.attach_flags & 8 == 0 && carry != [0.0; 3] {
+                                Self::move_floor_body(solids, &mut state, carry, radius, self.gates(), 0x40);
+                            }
+                        } else {
+                            state.attach = None;
+                            state.attach_flags = 0;
+                            self.floor_transition(&mut state, previous, Some(i), false);
+                        }
                     }
-                    Some((sector, pos, vel, attach, flat, crossed))
-                })
-                .collect();
-        // A projectile that dies on geometry is a miss in the encounter chronology; the call needs
-        // `&mut self`, so the indices are collected in the mutable iteration and reported after it.
-        let mut lost_shots: Vec<usize> = Vec::new();
-        // `sithThing_AttachThingToSurface` (`0x4cde80`): a body whose floor attach moved to a
-        // different surface messages that surface's cog `entered`; the send needs `&mut self`, so
-        // the transitions are collected in the mutable iteration and sent after it.
-        let mut surface_entered: Vec<AttachEntered> = Vec::new();
-        for (i, t) in self.things.iter_mut().enumerate() {
+                    let previous = state.attach;
+                    let gravity = if state.phys_flags & 0x40000 != 0 { self.gravity * 0.5 } else { self.gravity };
+                    let mut delta = crate::collide::Solids::update_thing_physics(&mut state, dt, radius, height, gravity);
+                    if let Some(surface) = state.attach.and_then(|a| a.surface) {
+                        let scroll = self.surface_scroll(surface);
+                        for axis in 0..3 { delta[axis] += scroll[axis] * dt; }
+                    }
+                    let recheck = delta == [0.0; 3] && state.attach_flags & 8 == 0
+                        && state.attach.and_then(|a| a.thing).is_some_and(|t| self.floor_parent_move(t.thing) == 2);
+                    if recheck || Self::move_floor_body(solids, &mut state, delta, radius, self.gates(), 0) {
+                        solids.find_floor_for(&mut state, radius, height, self.gates(), false, Some(i), self.thing_up(i));
+                        self.floor_transition(&mut state, previous, Some(i), false);
+                    }
+                    let flat = (state.pos[0] - pos[0]).hypot(state.pos[1] - pos[1]);
+                    let crossed = state.sector != sector;
+                    let anchor = state.attach.and_then(|a| a.thing)
+                        .and_then(|target| self.floor_local_anchor(target.thing, state.pos));
+                    if std::env::var_os("BK_SEAT_TRACE").is_some() {
+                        eprintln!("seat: thing {i} z {:.4} vz {:.4} attach {}", state.pos[2], state.vel[2], state.attach.is_some());
+                    }
+                    Some((state, flat, crossed, anchor))
+            })();
+            let t = &mut self.things[i];
             if Some(i) == player_at {
                 // Path moves still run — a script can walk the player along frames — but the body's
                 // velocity is the walker's to integrate, and `t.vel` is left for it to consume.
@@ -3526,21 +3520,16 @@ impl Runtime {
             // A gravity body's whole tick came through the seat above (`step_body`: the swept
             // move, the hold, the FindFloor tail); apply it and keep only the path/rotation
             // half of the generic loop here.
-            if let Some((sector, pos, vel, attach, flat, crossed)) = seat[i].take() {
-                let prev_surface = t.floor_attach.and_then(|a| a.surface);
-                let now_surface = attach.and_then(|a| a.surface);
-                let attach_flipped = t.floor_attach.is_some() != attach.is_some();
-                let fell = (pos[2] - t.pos[2]).abs() > 1e-9;
-                surface_entered.push(AttachEntered {
-                    prev: prev_surface,
-                    now: now_surface,
-                    flags: t.flags,
-                    sender: i,
-                });
-                t.pos = pos;
-                t.sector = sector as i32;
-                t.vel = vel;
-                t.floor_attach = attach;
+            if let Some((state, flat, crossed, anchor)) = seat {
+                let attach_flipped = t.floor_attach.is_some() != state.attach.is_some();
+                let fell = (state.pos[2] - t.pos[2]).abs() > 1e-9;
+                t.pos = state.pos;
+                t.sector = state.sector as i32;
+                t.vel = state.vel;
+                t.floor_attach = state.attach;
+                t.attach_flags = state.attach_flags;
+                t.phys_flags = state.phys_flags;
+                if let Some(anchor) = anchor { t.attach_offset = anchor; }
                 let rotating = t.rot_vel != [0.0; 3];
                 let path_moved = t.step(dt);
                 if rotating {
@@ -3684,14 +3673,6 @@ impl Runtime {
             if path_moved || flying {
                 moved.push(i);
             }
-        }
-        for entered in creation_entered.into_iter().chain(surface_entered) {
-            self.sith_thing_attach_thing_to_surface(
-                entered.prev,
-                entered.now,
-                entered.flags,
-                Some(entered.sender),
-            );
         }
         for index in lost_shots {
             self.note_shot_lost(index);
@@ -4675,12 +4656,7 @@ impl Runtime {
             }
         }
         let Some(solids) = self.solids.as_deref() else { return true };
-        let height = self
-            .things
-            .get(index)
-            .map(|thing| thing.insert[2])
-            .unwrap_or(0.0)
-            .max(radius + 0.005);
+        let height = self.thing_height(Some(index), radius);
         let maxstep = self
             .ai
             .get(&index)
@@ -4691,10 +4667,8 @@ impl Runtime {
             let Some(sector) = solids.sector_at(at, radius) else {
                 return false;
             };
-            // `resting_floor` is the walker's own floor answer: it searches the room **and the
-            // adjoins a body can reach**, which is what a doorway threshold needs, and it knows the
-            // solid things the engine collides (a catwalk, a crate) as well as the level's faces
-            // and planes. The reach is `height + maxstep`, so a ledge is still a ledge.
+            // `CanWalk` is a different engine query (`0x4eb4b0:26-35`, radius * 0.25,
+            // flags 0x2002); the AI's authored-point placement remains a separate approximation.
             // Probe a hair above the point: a body whose origin sits a millimetre inside a floor
             // (level 2's actor stands 0.0011 under it, and the walk keeps its own z) has no floor
             // *below* it, so every step was refused and the actor never walked.
@@ -6554,7 +6528,7 @@ impl Runtime {
                     {
                         self.ai_trace_source.insert(index, "blocked");
                         let r = 0.065;
-                        let h = self.things.get(index).map(|t| t.insert[2]).unwrap_or(0.0).max(r + 0.005);
+                        let h = self.thing_height(Some(index), r);
                         let m = self.ai.get(&index).map(|c| c.maxstep).unwrap_or(0.5).max(0.0);
                         let sector = solids.sector_at(next, r);
                         let lifted = [next[0], next[1], next[2] + 0.01];
@@ -7038,6 +7012,9 @@ impl Runtime {
                         }
                     }
                     body.pos = Vec3::from(pos);
+                    if body.attach.is_some() {
+                        body.attach = thing.floor_attach;
+                    }
                     if thing.sector != sector as i32 && let Ok(sector) = usize::try_from(thing.sector) {
                         body.sector = sector;
                     }
@@ -7067,15 +7044,10 @@ impl Runtime {
         let target = walk_target(along * force, across * force, input.yaw);
         let drag = if body.grounded { rules.drag } else { rules.air_drag };
         let steps = integrate_walk(&mut body.vel, target, drag, dt, &mut body.step_rollover);
-        // A jump detaches the body (`sithPlayerActions_Jump`) before its move.
-        if input.jump && body.grounded {
-            body.vy = rules.jump_velocity(input.crouch);
-            body.grounded = false;
-            body.attach = None;
-        }
-        // `sithPhysics_GetThingHeight` (`0x4f6210`): the template's `height=`, else the model's
-        // insert height (`walkplayer`'s 0.120114), at least `moveSize + 0.005` (`0x523184`).
-        let height = template_insert("walkplayer")[2].max(radius + 0.005);
+        let height = {
+            let rt = world.borrow();
+            rt.thing_height(rt.local_player(), radius)
+        };
         let thrusting = along != 0.0 || across != 0.0;
         // `SetSectorThrust` is half of a conveyor: `sithPhysics.c` adds `sector->thrust * dt` to a
         // body's velocity exactly like gravity, so an updraft column lifts what stands in it —
@@ -7088,46 +7060,61 @@ impl Runtime {
         if thrust != [0.0; 3] && std::env::var_os("BK_SCROLL_TRACE").is_some() {
             println!("thrust: sector {} accelerates the body at {thrust:?} units/s^2", body.sector);
         }
-        // A scrolling surface carries whatever stands on it: `sithThing.c` adds
-        // `scrollVector * dt` to the velocity of a thing attached to a `SITH_SURFACE_SCROLLING`
-        // surface, and that velocity goes through the same move. `SlideWall` is how a conveyor is
-        // built, and level 2's crate puzzle is the shipped case. The surface is read from where the
-        // body stood when this frame began, so the carry joins the walk instead of being overwritten.
-        let carry = match solids.floor_surface(
-            body.sector,
-            [body.pos.x, body.pos.y, body.pos.z - radius + 0.01],
-        ) {
-            Some((_, surface)) => {
-                let slide = world.borrow().surfaces.get(surface).map(|s| s.slide).unwrap_or([0.0; 2]);
-                if slide != [0.0; 2] && std::env::var_os("BK_SCROLL_TRACE").is_some() {
-                    println!(
-                        "scroll: surface {surface} carries the body at {slide:?} level units/second"
-                    );
-                }
-                slide
+        let mut state = world.borrow().player_move_state(body, body.sector, body.pos.to_array(),
+            [body.vel[0], body.vel[1], body.vy]);
+        // `MoveThing` pushes riders with search flag 0x40 (0x4e7950:61-77). The runtime has
+        // already advanced the parent's path, so move the rider by its changed anchor now.
+        if let Some(previous) = state.attach.filter(|a| a.thing.is_some()) {
+            let anchor = body.floor_anchor.filter(|(index, _)| Some(*index) == previous.thing.map(|t| t.thing))
+                .map(|(_, anchor)| anchor);
+            let ride = world.borrow().floor_rider_motion(solids, previous, state.pos, anchor);
+            if let Some((attach, carry)) = ride {
+                state.attach = Some(attach);
+                let carry = if state.attach_flags & 8 == 0 { carry } else { [0.0; 3] };
+                solids.move_thing_with(
+                    &mut state, carry, radius, 0x40,
+                    |state, dir, distance, radius, flags, search| {
+                        solids.search_for_collisions(state.sector, Some(state), state.pos, dir,
+                            distance, radius, world.borrow().gates(), flags, search);
+                    },
+                    |state, surface, far| Self::player_crossing(world, state, body.eye, surface, far, &mut dispatch),
+                    |state| solids.inside_sector_with_gates(state.sector, state.pos, 0.0, world.borrow().gates()),
+                    |_| {},
+                );
+            } else {
+                let mut rt = world.borrow_mut();
+                let player = rt.local_player();
+                let previous = state.attach.take();
+                state.attach_flags = 0;
+                rt.floor_transition(&mut state, previous, player, false);
             }
-            None => [0.0; 2],
-        };
+        }
+        // A jump inherits the surface or parent's velocity on detach (0x4ce380).
+        if input.jump && body.grounded {
+            state.vel[2] = rules.jump_velocity(input.crouch);
+            let mut rt = world.borrow_mut();
+            let player = rt.local_player();
+            let previous = state.attach.take();
+            state.attach_flags = 0;
+            rt.floor_transition(&mut state, previous, player, false);
+            body.grounded = false;
+        }
         let gravity = body.gravity;
         // The fall impact is measured before this frame's sector thrust, which is what the old
         // walker did when it read `player.vy` before committing the thrust-scaled local.
         let impact_vy = body.vy;
-        body.vy += thrust[2] * dt;
-        let before = body.pos.to_array();
-        let dir = [
-            body.vel[0] + carry[0] + thrust[0] * dt,
-            body.vel[1] + carry[1] + thrust[1] * dt,
-        ];
-        let mut pos = before;
-        let mut sector = body.sector;
-        let mut vy = body.vy;
-        let mut achieved_len = 0.0f32;
+        state.vel[0] += thrust[0] * dt;
+        state.vel[1] += thrust[1] * dt;
+        state.vel[2] += thrust[2] * dt;
+        let mut pos = state.pos;
+        let mut achieved_len: f32 = 0.0;
+        let mut sector = state.sector;
+        let mut vy = state.vel[2];
         let mut landed = false;
         let mut crossed = false;
-        let mut step_vel = [dir[0], dir[1], vy];
+        let mut step_vel = state.vel;
         let wet = |s: usize| world.borrow().sector_flags.get(s).is_some_and(|f| f & crate::collide::SECTOR_UNDERWATER != 0);
         let mut surface = body.water_surface;
-        let mut state = world.borrow().player_move_state(body, sector, pos, step_vel);
         for _ in 0..steps {
             const SUB: f32 = 1.0 / 50.0;
             // Each sub-step moves by the projected velocity, the way the engine re-copies the
@@ -7145,7 +7132,7 @@ impl Runtime {
             // `sithPhysics_UpdateThing`'s routing (`0x4f5900:22-29`) tests the attach first: an
             // attached body keeps the floor hold even under water (it wades), and only an
             // unattached one takes the underwater model.
-            let held = (was_wet && body.attach.is_none()).then(|| {
+            let held = (was_wet && state.attach.is_none()).then(|| {
                 vy -= vy * (SUB * rules.air_drag * 4.0).min(1.0);
                 if vy.abs() <= 1e-5 {
                     vy = 0.0;
@@ -7167,16 +7154,20 @@ impl Runtime {
                 held
             });
             state.vel = step_vel;
-            state.attach = body.attach;
             state.water_surface = surface;
             let submerged = was_wet && state.attach.is_none();
-            let delta = crate::collide::Solids::update_thing_physics(
+            let mut delta = crate::collide::Solids::update_thing_physics(
                 &mut state, SUB, radius, height, if submerged { 0.0 } else { gravity },
             );
+            if let Some(surface) = state.attach.and_then(|a| a.surface) {
+                let scroll = world.borrow().surface_scroll(surface);
+                for axis in 0..3 { delta[axis] += scroll[axis] * SUB; }
+            }
             let prepared_vz = state.vel[2];
             let start = state.pos;
             let previous = state.sector;
-            let mut step_landed = false;
+            let mut find_floor = delta == [0.0; 3] && state.move_type == 1 && state.attach_flags & 8 == 0
+                && state.attach.and_then(|a| a.thing).is_some_and(|t| world.borrow().floor_parent_move(t.thing) == 2);
             let traveled = solids.move_thing_with(
                 &mut state, delta, radius, 0,
                 |state, dir, distance, radius, flags, search| {
@@ -7197,28 +7188,10 @@ impl Runtime {
                         Gates { sectors: &rt.sector_flags, adjoins: &rt.adjoin_flags },
                     )
                 },
-                |state| {
-                    // `sithThing_AttachThingToSurface` (`0x4cde80`): FindFloor's attach is the
-                    // engine's call site, and its message half fires when the attach *surface*
-                    // changed — the `landed` bool misses a move between surfaces. The pre-check
-                    // here only avoids a needless `borrow_mut` per sub-step; the send's own
-                    // same-surface rule lives in the callee.
-                    let prev = state.attach.and_then(|a| a.surface);
-                    {
-                        let rt = world.borrow();
-                        step_landed = solids.finish_body(
-                            state, radius, height,
-                            Gates { sectors: &rt.sector_flags, adjoins: &rt.adjoin_flags },
-                        );
-                    }
-                    let now = state.attach.and_then(|a| a.surface);
-                    if now != prev {
-                        let player = world.borrow().local_player();
-                        let flags = state.flags;
-                        world.borrow_mut().sith_thing_attach_thing_to_surface(prev, now, flags, player);
-                    }
-                },
+                |_| { find_floor = true; },
             );
+            let step_landed = find_floor
+                && Self::player_find_floor(world, solids, &mut state, radius, height, body.eye, &mut dispatch);
             if std::env::var_os("BK_STEP_TRACE").is_some() {
                 let kind = match &state.attach {
                     Some(a) => if a.thing.is_some() { "thing" } else { "surface" },
@@ -7255,30 +7228,9 @@ impl Runtime {
         // through ride the frame's `MoveState`, so a body that did not move touches nothing.
         body.touched_items.extend(state.touched.iter().copied());
         body.water_surface = surface;
-        // `CollideHurt`'s projection lands on the frame velocity (`0x1d4`); the persisted walk
-        // state is the frame velocity minus this frame's non-persisted carry and thrust adds
-        // (the engine folds scroll and thrust into the velocity itself; the port re-reads them
-        // each frame, so they are stripped on the way back out).
-        body.vel = [
-            step_vel[0] - carry[0] - thrust[0] * dt,
-            step_vel[1] - carry[1] - thrust[1] * dt,
-        ];
+        // Surface carry joins the displacement, not the relative physics velocity (0x4cc4c0:33-38).
+        body.vel = [step_vel[0] - thrust[0] * dt, step_vel[1] - thrust[1] * dt];
         vy = step_vel[2];
-        // A moving elevator's top rises into the body. This is a carry rule, not a floor choice:
-        // `resting_floor` already seats the body on a lift's top, while a platform that rises into
-        // it has to lift the body, which is what `sithPhysics_UpdateAttachedThingPhysics` does.
-        if vy <= 0.0
-            && let Some(top) = world.borrow().elevator_floor([pos[0], pos[1], before[2]], radius)
-        {
-            let feet = pos[2] - radius;
-            let before_feet = before[2] - radius;
-            let accept = top > feet - 0.02 && top <= before_feet + 0.2;
-            if accept {
-                pos[2] = top + radius;
-                vy = 0.0;
-                landed = true;
-            }
-        }
         // Landing damage wants the engine's velocity units, not this world's gravity-scaled fall.
         let engine_impact = -impact_vy / crate::physics_scale().max(1.0).sqrt();
         if landed && engine_impact > 2.5 {
@@ -7294,6 +7246,10 @@ impl Runtime {
         body.vy = vy;
         body.sector = sector;
         body.pos = Vec3::from(pos);
+        body.attach = state.attach;
+        body.floor_anchor = body.attach.and_then(|a| a.thing).and_then(|parent| {
+            world.borrow().floor_local_anchor(parent.thing, state.pos).map(|anchor| (parent.thing, anchor))
+        });
         body.last_move = achieved_len;
         body.grounded = body.attach.is_some() || landed || body.vy == 0.0;
         // The engine's fall death (`sithPlayer.c:251`).
@@ -7342,6 +7298,8 @@ impl Runtime {
                 body.published_vel = thing.vel;
                 thing.flags = state.flags;
                 thing.phys_flags = state.phys_flags;
+                thing.floor_attach = state.attach;
+                thing.attach_flags = state.attach_flags;
             }
             rt.publish_player(body);
             body.published_pose = rt.local_player().map(|i| (rt.things[i].pos, body.sector));
@@ -7359,7 +7317,9 @@ impl Runtime {
             touched: Vec::new(),
             pos, sector, vel, remainder: [0.0; 3], attach: body.attach,
             water_surface: body.water_surface,
-            attach_flags: thing.map_or(0, |t| t.attach_flags),
+            attach_flags: body.attach.map_or(0, |a| {
+                thing.map_or(0, |t| t.attach_flags & 8) | if a.surface.is_some() { 1 } else { 2 }
+            }),
             kind: player.map_or(10, |i| self.types.get(i).copied().unwrap_or(0) as u32),
             move_type: name.map_or(1, |n| match self.template_move.get(n).map(String::as_str) {
                 Some("physics") => 1, Some("path") => 2, _ => 0,
@@ -7385,14 +7345,16 @@ impl Runtime {
             thing.vel = state.vel;
             thing.flags = state.flags;
             thing.phys_flags = state.phys_flags;
+            thing.floor_attach = state.attach;
+            thing.attach_flags = state.attach_flags;
         }
         dispatch();
         let rt = world.borrow();
         let thing = &rt.things[index];
+        let teleported = thing.pos.map(f32::to_bits) != published.map(f32::to_bits);
         for axis in 0..3 {
             if thing.pos[axis].to_bits() != published[axis].to_bits() {
                 state.pos[axis] = if axis == 2 { thing.pos[axis] - eye } else { thing.pos[axis] };
-                state.attach = None;
             }
         }
         if let Ok(sector) = usize::try_from(thing.sector) {
@@ -7401,7 +7363,8 @@ impl Runtime {
         state.vel = thing.vel;
         state.flags = thing.flags;
         state.phys_flags = thing.phys_flags;
-        state.attach_flags = thing.attach_flags;
+        state.attach = if teleported { None } else { thing.floor_attach };
+        state.attach_flags = if teleported { 0 } else { thing.attach_flags };
         state.kind = rt.types.get(index).copied().unwrap_or(0) as u32;
     }
 
@@ -7542,6 +7505,194 @@ impl Runtime {
             .iter()
             .position(|t| t.eq_ignore_ascii_case("walkplayer"))
             .filter(|index| *index < self.things.len())
+    }
+
+    fn thing_height(&self, index: Option<usize>, radius: f32) -> f32 {
+        let name = index.and_then(|i| self.templates.get(i)).map_or("walkplayer", String::as_str);
+        let insert = index.map_or_else(|| template_insert(name)[2], |i| self.things[i].insert[2]);
+        crate::collide::get_thing_height(self.template_height.get(name).copied().unwrap_or(0.0), insert, radius)
+    }
+
+    fn floor_parent_move(&self, index: usize) -> u32 {
+        match self.templates.get(index).and_then(|name| self.template_move.get(name)).map(String::as_str) {
+            Some("physics") => 1,
+            Some("path") => 2,
+            _ => 0,
+        }
+    }
+
+    /// `0x4ce050:71-74`: inverse ortho rotation of the rider's offset.
+    fn floor_local_anchor(&self, index: usize, pos: [f32; 3]) -> Option<[f32; 3]> {
+        let thing = self.things.get(index)?;
+        let relative = Vec3::from(pos) - Vec3::from(thing.pos);
+        Some([0, 1, 2].map(|axis| {
+            let mut basis = [0.0; 3];
+            basis[axis] = 1.0;
+            relative.dot(Vec3::from(rotate_by_angles(basis, thing.pitch, thing.yaw, thing.roll)))
+        }))
+    }
+
+    fn floor_rider_motion(
+        &self, solids: &crate::collide::Solids, previous: crate::collide::Attach,
+        pos: [f32; 3], anchor: Option<[f32; 3]>,
+    ) -> Option<(crate::collide::Attach, [f32; 3])> {
+        let target = previous.thing?;
+        let parent = self.things.get(target.thing).filter(|t| !t.destroyed && t.flags & 0x80002 == 0)?;
+        let attach = solids.thing_face_attach(target)?;
+        let carry = anchor.map_or([0.0; 3], |offset| {
+            (Vec3::from(parent.pos) + Vec3::from(rotate_by_angles(offset, parent.pitch, parent.yaw, parent.roll))
+                - Vec3::from(pos)).to_array()
+        });
+        Some((attach, carry))
+    }
+
+    fn move_floor_body(
+        solids: &crate::collide::Solids, state: &mut crate::collide::MoveState, delta: [f32; 3],
+        radius: f32, gates: Gates<'_>, flags: u32,
+    ) -> bool {
+        let mut find_floor = false;
+        solids.move_thing_with(
+            state, delta, radius, flags,
+            |state, dir, dist, radius, flags, search| {
+                solids.search_for_collisions(state.sector, Some(state), state.pos, dir, dist, radius, gates, flags, search);
+            },
+            |state, _, far| {
+                if state.sector != far && gates.sectors.get(far).is_some_and(|f| f & crate::collide::SECTOR_UNDERWATER != 0) {
+                    state.vel[2] *= 0.25;
+                }
+                state.sector = far;
+            },
+            |state| solids.inside_sector_with_gates(state.sector, state.pos, 0.0, gates),
+            |_| { find_floor = true; },
+        );
+        find_floor
+    }
+
+    /// `sithSurface_DetachThing` (0x4f0a30): the live scroll, only while the surface is scrolling.
+    fn surface_scroll(&self, surface: usize) -> [f32; 3] {
+        if self.surface_flags.get(surface).is_some_and(|flags| flags & 0x800 != 0)
+            && let Some(surface) = self.surfaces.get(surface)
+        {
+            return surface.slide;
+        }
+        [0.0; 3]
+    }
+
+    fn floor_velocity(&self, attach: crate::collide::Attach) -> Vec3 {
+        if let Some(surface) = attach.surface {
+            return Vec3::from(self.surface_scroll(surface));
+        }
+        let Some(target) = attach.thing else { return Vec3::ZERO };
+        let Some(parent) = self.things.get(target.thing) else { return Vec3::ZERO };
+        match self.floor_parent_move(target.thing) {
+            1 => Vec3::from(parent.vel),
+            2 if !parent.paused => {
+                // The port's frame rate is frames/second; the engine stores path direction × speed.
+                let Some((target, speed)) = parent.target else { return Vec3::ZERO };
+                let segment = if target > parent.frame { parent.frame.floor() } else { parent.frame.ceil() - 1.0 };
+                let i = segment.max(0.0) as usize;
+                let Some((a, b)) = parent.frames.get(i).zip(parent.frames.get(i + 1)) else { return Vec3::ZERO };
+                Vec3::new(b[0] - a[0], b[1] - a[1], b[2] - a[2]) * (speed * (target - parent.frame).signum())
+            }
+            _ => Vec3::ZERO,
+        }
+    }
+
+    fn player_find_floor(
+        world: &World, solids: &crate::collide::Solids, state: &mut crate::collide::MoveState,
+        radius: f32, height: f32, eye: f32, dispatch: &mut impl FnMut(),
+    ) -> bool {
+        let previous = state.attach;
+        let mut rt = world.borrow_mut();
+        let player = rt.local_player();
+        let up = player.map_or([0.0, 0.0, 1.0], |i| rt.thing_up(i));
+        solids.find_floor_for(state, radius, height, rt.gates(), false, player, up);
+        let landed = previous.is_none() && state.attach.is_some();
+        let changed = rt.floor_transition(state, previous, player, true);
+        drop(rt);
+        if changed {
+            Self::player_move_phase(world, state, eye, dispatch);
+            if landed && let (Some(index), Some(attach)) = (player, state.attach) {
+                world.borrow_mut().floor_landing(index, state, attach);
+            }
+        }
+        landed && state.attach.is_some()
+    }
+
+    fn thing_up(&self, index: usize) -> [f32; 3] {
+        let thing = &self.things[index];
+        rotate_by_angles([0.0, 0.0, 1.0], thing.pitch, thing.yaw, thing.roll)
+    }
+
+    /// `0x4ce380`, `0x4cde80`, `0x4ce050`: change support velocity, send exit/entry, then land.
+    fn floor_transition(
+        &mut self, state: &mut crate::collide::MoveState, previous: Option<crate::collide::Attach>,
+        sender: Option<usize>, force: bool,
+    ) -> bool {
+        let identity = |a: crate::collide::Attach| (a.surface, a.thing);
+        if previous.map(identity) == state.attach.map(identity) { return false; }
+        if state.move_type == 1 {
+            let old = previous.map_or(Vec3::ZERO, |a| self.floor_velocity(a));
+            let new = state.attach.map_or(Vec3::ZERO, |a| self.floor_velocity(a));
+            state.vel = (Vec3::from(state.vel) + old - new).to_array();
+        }
+        if let Some(old) = previous.filter(|_| state.flags & 0x100 == 0) {
+            if let Some(surface) = old.surface
+                && self.surface_flags.get(surface).is_some_and(|f| f & SITH_SURFACE_COG_LINKED != 0)
+            {
+                self.sith_cog_surface_send_message(surface, sender, "exited");
+            } else if let Some(target) = old.thing
+                && self.things.get(target.thing).is_some_and(|t| t.flags & 0x400 != 0)
+            {
+                self.sith_cog_thing_send_message(target.thing, sender, "exited");
+            }
+        }
+        let Some(new) = state.attach else { return true };
+        self.sith_thing_attach_thing_to_surface(previous.and_then(|a| a.surface), new.surface, state.flags, sender);
+        if let Some(target) = new.thing
+            && state.flags & 0x80100 == 0
+            && self.things.get(target.thing).is_some_and(|t| t.flags & 0x400 != 0)
+        {
+            self.sith_cog_thing_send_message(target.thing, sender, "entered");
+        }
+        if !force && previous.is_none() && let Some(index) = sender {
+            self.floor_landing(index, state, new);
+        }
+        true
+    }
+
+    /// `sithCollision_FallHurt` (0x4e9550), called on a fresh, unforced attach.
+    fn floor_landing(&mut self, index: usize, state: &crate::collide::MoveState, attach: crate::collide::Attach) {
+        let impact = -Vec3::from(state.vel).dot(Vec3::from(attach.normal));
+        // `_DAT_00522e94` = 2.5, read from JK.EXE. Sound names come from the 0x54b40c table.
+        if impact > 2.5 {
+            let damage = crate::fall_damage(impact);
+            if damage > 0.0 {
+                self.queue_mode_sound(index, "hitdamaged", state.pos);
+                let left = self.damage_typed_from(index as i64, damage, DAMAGE_FALL, index as i64);
+                if state.kind == 10 && left <= 0.0 { self.player_dead = true; }
+            }
+            self.queue_mode_sound(index, "landhurt", state.pos);
+        }
+        let mode = if let Some(surface) = attach.surface {
+            let flags = self.surface_flags.get(surface).copied().unwrap_or(0);
+            if flags & 0x10000 != 0 { "landmetal" }
+            else if flags & 0x20000 != 0 { "landwater" }
+            else if flags & 0x40000 != 0 { "landpuddle" }
+            else if flags & 0x180000 != 0 { "landearth" }
+            else { "landhard" }
+        } else {
+            let flags = attach.thing.and_then(|a| self.things.get(a.thing)).map_or(0, |t| t.flags);
+            if flags & 0x400000 != 0 { "landmetal" }
+            else if flags & 0x800000 != 0 { "landearth" }
+            else { "landhard" }
+        };
+        self.queue_mode_sound(index, mode, state.pos);
+        if attach.surface.is_some() && state.move_type == 1 && state.phys_flags & 0x10000 == 0
+            && self.templates.get(index).is_some_and(|n| self.template_puppet.contains(n))
+        {
+            self.play_mode.insert(index, 0x14);
+        }
     }
 
     /// Write the body's final pose onto the local player's thing: the eye point, facing, aim and
@@ -8452,38 +8603,6 @@ impl Runtime {
         true
     }
 
-
-    /// The floor of a moving elevator under the body: a **carry** rule, not a floor choice.
-    ///
-    /// A lift's top that rises into a body standing on it lifts the body with the surface, which is
-    /// what `sithPhysics_UpdateAttachedThingPhysics` does. Resting floors come from
-    /// [`crate::collide::LevelGeometry::resting_floor`], which knows every solid thing's top; only
-    /// this lift case needs the template name, and restricting it to `*elev*` keeps a table or crate
-    /// above the feet from teleporting a body upward.
-    pub fn elevator_floor(&self, pos: [f32; 3], body_radius: f32) -> Option<f32> {
-        let feet = pos[2] - body_radius;
-        let mut best: Option<f32> = None;
-        for (index, thing) in self.things.iter().enumerate() {
-            if thing.destroyed {
-                continue;
-            }
-            let Some(template) = self.templates.get(index) else { continue };
-            if !template.to_ascii_lowercase().contains("elev") {
-                continue;
-            }
-            let Some((top_offset, half_x, half_y)) = template_floor(template) else { continue };
-            if (pos[0] - thing.pos[0]).abs() > half_x + body_radius
-                || (pos[1] - thing.pos[1]).abs() > half_y + body_radius
-            {
-                continue;
-            }
-            let top = thing.pos[2] + top_offset;
-            if top <= feet + 0.2 && best.is_none_or(|at| top > at) {
-                best = Some(top);
-            }
-        }
-        best
-    }
 
     /// Every (shot, target, carried damage) impact this frame, from `first_created` onward.
     ///
@@ -10301,7 +10420,8 @@ impl Runtime {
                 let vec = args.get(1).map(vec3).unwrap_or([0.0; 3]);
                 let scale = num(2) as f32 * 0.1;
                 if let Some(s) = self.surface_mut(idx(0)) {
-                    s.slide = [-vec[0] * scale, -vec[1] * scale];
+                    s.slide = vec.map(|v| -v * scale);
+                    if let Some(flags) = self.surface_flags.get_mut(idx(0) as usize) { *flags |= 0x800; }
                     self.surface_epoch += 1;
                 }
                 Value::Nil
@@ -13165,6 +13285,7 @@ mod tests {
             pitch: 0.0,
             eye: crate::PLAYER_EYE,
             attach: None,
+            floor_anchor: None,
             water_surface: None,
             published_vel: [0.0; 3],
             published_pose: None,
@@ -13297,10 +13418,12 @@ mod tests {
             rt.step(None, 1.0 / 30.0);
         }
         assert!(
-            (rt.things[0].pos[2] - 0.205).abs() < 1e-3,
+            (rt.things[0].pos[2] - 0.2).abs() < 1e-3,
             "the good did not rest on the plane: z {}",
             rt.things[0].pos[2]
         );
+        // This weapon-kind debris has no physflag 0x40; it stops at contact without attaching.
+        assert!(rt.things[0].floor_attach.is_none());
         assert!((-2.0..2e-3).contains(&rt.things[0].vel[2]), "the landed good kept a downward velocity {}", rt.things[0].vel[2]);
     }
 
@@ -13363,10 +13486,11 @@ mod tests {
         }
         assert!(!rt.things[0].destroyed, "the gravity good died before it landed");
         assert!(
-            (rt.things[0].pos[2] - 0.205).abs() < 1e-3,
+            (rt.things[0].pos[2] - 0.2).abs() < 1e-3,
             "the good did not reach the floor: z {}",
             rt.things[0].pos[2]
         );
+        assert!(rt.things[0].floor_attach.is_none());
         assert!((-2.0..2e-3).contains(&rt.things[0].vel[2]), "the landed good kept a downward velocity {}", rt.things[0].vel[2]);
     }
 
@@ -13490,15 +13614,13 @@ mod tests {
         assert_eq!(rt.template_hit["barething"].0, 0.065, "an unnamed size keeps the player's");
     }
 
-    /// A solid thing's own model is a surface the engine collides with, and the **one** floor rule
-    /// reads it: the collider carries every collidable thing's top (`ThingSolid::z_max`), so the
-    /// player's sweep, AI settling, actor grounding and gravity landing all land on the same slab.
+    /// A model face can support an actor just like a level floor.
     #[test]
     fn a_solid_things_model_is_a_floor() {
         // A `collide=3` walkstruct-style slab: its model's top face is the floor (`0x5080d0` mesh
         // arm into `FindFloor`'s thing attach), thingflag `0x40` admits the `0x10`-gated search.
         let slab = crate::collide::ThingSolid {
-            index: 0,
+            index: 1,
             centre: [0.0, 0.0, 1.0],
             origin: [0.0, 0.0, 1.0],
             radius: 0.5,
@@ -13534,9 +13656,7 @@ mod tests {
         assert_eq!(solids.resting_floor(0, [2.0, 0.0, 1.0123 + 0.065], 0.1, 0.065, false).map(|r| r.height), None);
         assert_eq!(solids.resting_floor(0, [0.0, 0.0, 1.0123 + 0.4], 0.1, 0.065, false).map(|r| r.height), None);
 
-        // The actor path: a room whose floor plane is far below the slab. The actor over the slab is
-        // not within its creation reach of that plane, so gravity takes it and the step's own landing
-        // clamp — the same `resting_floor` — seats it one radius over the *slab*, not the room floor.
+        // The actor starts beyond creation reach, falls, and seats on the mesh face.
         let mut rt = door_runtime();
         rt.things[0].pos = [0.0, 0.0, 1.5];
         rt.things[0].sector = 0;
@@ -13544,6 +13664,13 @@ mod tests {
         rt.templates = vec!["mousebot".into()];
         rt.types = vec![2];
         rt.mass.insert(0, 150.0);
+        let mut support = rt.things[0].clone();
+        support.pos = slab.origin;
+        support.flags = 0x40;
+        support.phys_flags = 0;
+        rt.things.push(support);
+        rt.templates.push("testslab".into());
+        rt.types.push(7);
         let plane = crate::collide::Plane {
             normal: [0.0, 0.0, -1.0],
             point: [0.0; 3],
@@ -13568,10 +13695,7 @@ mod tests {
             "the actor did not settle on the slab: z {}",
             rt.things[0].pos[2]
         );
-        // The impact velocity survives in `vel` on purpose: the engine writes the projected,
-        // snapped velocity back in `UpdateAttachedThingPhysics` (`0x4f7430:439-485`), which is
-        // ticket #101's slanted-floor remainder — the mesh attach here merely surfaces it.
-        assert!(rt.things[0].vel[2] < 0.0, "the actor never fell onto the slab");
+        assert_eq!(rt.things[0].floor_attach.and_then(|a| a.thing).map(|target| target.thing), Some(1));
     }
 
     /// A projectile's own move is what the engine tests (`sithCollision_SearchForCollisions`), not
@@ -14150,7 +14274,7 @@ mod tests {
             center: [0.0; 3],
             cel: 0.0,
             anim: 0.0,
-            slide: [0.0; 2],
+            slide: [0.0; 3],
             next: 0.0,
             light: 0.0,
             light_end: 0.0,
@@ -14206,7 +14330,7 @@ mod tests {
             center: [0.0; 3],
             cel: 0.0,
             anim: 0.0,
-            slide: [0.0; 2],
+            slide: [0.0; 3],
             next: 0.0,
             light: 0.0,
             light_end: 0.0,
@@ -14255,7 +14379,7 @@ mod tests {
     fn the_new_world_verbs_act_on_the_world() {
         let mut rt = door_runtime();
         // A surface's cel round-trips, and its centre is whatever the level said.
-        rt.surfaces.push(SurfaceState { center: [1.0, 2.0, 3.0], cel: 0.0, anim: 0.0, slide: [0.0; 2], next: 0.0, light: 0.0, light_end: 0.0, light_rate: 0.0 });
+        rt.surfaces.push(SurfaceState { center: [1.0, 2.0, 3.0], cel: 0.0, anim: 0.0, slide: [0.0; 3], next: 0.0, light: 0.0, light_end: 0.0, light_rate: 0.0 });
         rt.call("SetWallCel", &[Value::Num(0.0), Value::Num(4.0)]);
         assert_eq!(rt.call("GetWallCel", &[Value::Num(0.0)]), Value::Num(4.0));
         assert_eq!(rt.call("SurfaceCenter", &[Value::Num(0.0)]), Value::Vec([1.0, 2.0, 3.0]));
@@ -17328,7 +17452,7 @@ mod tests {
             center: [0.0; 3],
             cel: 0.0,
             anim: 0.0,
-            slide: [1.0, 0.0],
+            slide: [1.0, 0.0, 0.0],
             next: 0.0,
             light: 0.0,
             light_end: 0.0,
@@ -17345,13 +17469,77 @@ mod tests {
     }
 
     #[test]
+    fn step_player_attaches_to_a_live_path_face_and_rides_both_directions() {
+        use crate::collide::{Face, ThingSolid};
+
+        let solids = crate::collide::test_room();
+        let mut rt = player_runtime();
+        let mut lift = rt.things[0].clone();
+        lift.pos = [0.0; 3];
+        lift.vel = [0.0; 3];
+        lift.flags = 0x40;
+        lift.frame = 0.0;
+        lift.frames = vec![[0.0; 6], [0.0, 0.0, 0.5, 0.0, 0.0, 0.0]];
+        lift.target = Some((1.0, 6.0));
+        let parent = rt.things.len();
+        rt.things.push(lift);
+        rt.templates.push("testplatform".into());
+        rt.types.push(7);
+        rt.template_move.insert("testplatform".into(), "path".into());
+        rt.template_height.insert("walkplayer".into(), 0.125);
+        let pose = |z| solids.set_things(vec![ThingSolid {
+            index: parent, centre: [0.0, 0.0, z], origin: [0.0, 0.0, z], radius: 0.75,
+            z_min: z - 0.05, z_max: z, sector: 0, half: None, yaw: 0.0,
+            mesh: Some(vec![vec![Face {
+                normal: [0.0, 0.0, 1.0], point: [-0.5, -0.5, z],
+                verts: vec![[-0.5, -0.5, z], [0.5, -0.5, z], [0.5, 0.5, z], [-0.5, 0.5, z]],
+                surface: usize::MAX,
+            }]].into()),
+            thing_flags: 0x40, collide: 3, owner: None, kind: 7, item: false,
+        }]);
+        pose(0.0);
+        let rules = crate::Rules::from_level(&Level::default());
+        let mut body = walk_body(Vec3::new(0.0, 0.0, rules.radius + 0.015));
+        body.grounded = false;
+        body.gravity = 0.0;
+        body.vy = -0.5;
+        let world = World::new(rt);
+        let tick = |body: &mut PlayerBody| {
+            Runtime::step_player(&world, body, &solids, PlayerInput::default(), &rules, 0.02, || {});
+        };
+        tick(&mut body);
+        let target = body.attach.and_then(|a| a.thing).expect("mesh-floor attachment");
+        assert_eq!(target.thing, parent);
+        assert!((world.borrow().things[0].health - 55.0).abs() < 0.1, "impact is relative to the path's +3 u/s");
+        for (frame, z) in [(0.6, 0.3), (0.4, 0.2)] {
+            {
+                let mut rt = world.borrow_mut();
+                let lift = &mut rt.things[parent];
+                lift.frame = frame;
+                lift.pos[2] = z;
+                lift.target = None;
+            }
+            pose(z);
+            for _ in 0..5 { tick(&mut body); }
+            assert_eq!(body.attach.and_then(|a| a.thing), Some(target));
+            assert!((body.pos.z - z - 0.125).abs() < 0.015, "body z {} on lift z {z}", body.pos.z);
+        }
+        assert!((world.borrow().things[0].health - 55.0).abs() < 0.1, "riding must not repeat landing damage");
+    }
+
+    #[test]
     fn step_player_carries_a_body_on_a_scrolling_surface() {
         let solids = floor_room();
         let mut rt = Runtime::new(&Level::default());
         rt.surfaces.push(slide_surface());
+        rt.surface_flags = vec![0x800];
         let rules = crate::Rules::from_level(&Level::default());
         let base = -1.0 + rules.radius;
         let mut body = walk_body(Vec3::new(0.0, 0.0, base));
+        // A conveyor acts on its attached rider, not on an airborne sphere over its plane.
+        body.attach = Some(crate::collide::Attach {
+            normal: [0.0, 0.0, 1.0], point: [0.0, 0.0, -1.0], surface: Some(0), thing: None, friction: 1.0,
+        });
         let rt = World::new(rt);
         for _ in 0..30 {
             Runtime::step_player(&rt,
@@ -18527,7 +18715,7 @@ mod tests {
             center: [1.20, 9.70, 6.357],
             cel: 0.0,
             anim: 0.0,
-            slide: [0.0; 2],
+            slide: [0.0; 3],
             next: 0.0,
             light: 0.0,
             light_end: 0.0,
@@ -18559,7 +18747,7 @@ mod tests {
             center,
             cel: 0.0,
             anim: 0.0,
-            slide: [0.0; 2],
+            slide: [0.0; 3],
             next: 0.0,
             light: 0.0,
             light_end: 0.0,
@@ -18604,7 +18792,7 @@ mod tests {
             center: [-0.1, 0.0, 0.0],
             cel: 0.0,
             anim: 0.0,
-            slide: [0.0; 2],
+            slide: [0.0; 3],
             next: 0.0,
             light: 0.0,
             light_end: 0.0,
@@ -18635,7 +18823,7 @@ mod tests {
                 center: [-0.1, 0.0, 0.0],
                 cel: 0.0,
                 anim: 0.0,
-                slide: [0.0; 2],
+                slide: [0.0; 3],
                 next: 0.0,
                 light: 0.0,
                 light_end: 0.0,
@@ -18700,7 +18888,7 @@ mod tests {
             center: [-0.1, 0.0, 0.0],
             cel: 0.0,
             anim: 0.0,
-            slide: [0.0; 2],
+            slide: [0.0; 3],
             next: 0.0,
             light: 0.0,
             light_end: 0.0,
