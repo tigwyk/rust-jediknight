@@ -7834,3 +7834,18 @@ samples) or truncates the trace at 297 (false kills). At 300 the gate is 0 failu
 encounter trace is byte-identical to the 3aa3765 baseline binary under the same invocation. Also:
 `BK_ENCOUNTER_OUT` exported in a shell flips `encounter_events_enabled` for the unit tests — run
 `cargo test` with it unset.
+
+## Round: #97 the AI contract — the ledger rows close
+
+Spec #89's contract: the AI ledger rows retire on the landed tickets. AI turning (#92's
+SetLookFrame + sub_4EA630 blend), dodge and sensedanger's engine gates (#95), AI detection
+(#90's armed passes + #91's CheckSightThing + #94's LookForTarget), the engagement vantage
+(#96's evidence round — the 0x1004 dormancy matches retail's static capture), the AI events
+(2/4/0x100/0x800 emitted; 0x200 is dead mask content the engine never produces either), and
+the projectile spawn (#93's engine fire point with fireoffset, lead, lob and the accuracy
+gate). AI chatter keeps its named ceiling (the one-shot 2D pipe until the audio-mixer spec);
+sensedanger keeps its two mapped-field substitutions. Full battery on 29a30498: 460 tests,
+--walk all 34/34, trace gate 9/9, route oracle PASS (tick-36 sector residue pre-existing),
+encounter gate 0 failures under BK_EXIT_FRAMES=300, --soak/--soak-all/--tour/--cog-check
+green. The windowed legs (--ai-live) are orchestrator-owned on this box: two agent windowed
+runs hung in presentation and were killed; the agents run headless only now.
