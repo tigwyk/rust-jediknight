@@ -7795,3 +7795,21 @@ orientation — so fire_toward gained an aim point: the AI's bolt leaves at its 
 the turn blend has to go. Without it the retired shot snap made every AI bolt fly along a
 mid-blend body yaw, and the encounter gate's first door shot missed (5 failures); with it the
 gate returns to 0 failures against the 0b1e980 baseline's 0.
+
+## Round: #96 the level-3 engagement at the data-derived vantage (commit none — evidence round)
+
+No code change: every acceptance criterion already holds on 4b8af59 through the landed
+scheduler/perception/fire work. Measured at the ledger row's own vantage
+(`--start 03katarn --warp -0.76,-4.74,-0.20,-53`, the `katarn_ai_193` row computed from
+`--thing-list`'s thing 193 data position): the port now fires **zero** bolts and lands zero hits
+over 1800 frames (30 s) — round 284's two `+ebow` bolts were a pre-#90 code state; with
+sithAI_Create's ai_flags 0x1004 dormancy the port is idle exactly as retail's own captures are
+(aistatus-03katarn-193.txt: static idle words, HUD 100/50). The engagement start is data-derived
+on every side that grades it: the encounter gate's pose is the fixture's walkplayer placement
+seeded by the engine's route_door.tsv capture, the level-3 vantage is map data, and the port's AI
+path picks no nearest actor (the nearest-actor picks are `--fire`/`--hit`/`--fire-demo` harness
+probes only). Level-3 script setup path runs (kyle.cog's freeze/clear seen in the probe).
+Gates on c9006143 (= 4b8af59, branch carries no delta, A/B trivially identical): unit 458/458,
+`--ai`, `--soak`, `--tour`, `--cog-check` (0 stubbed), encounter gate 0 failures (13 paired
+hits, settled 22.0 vs 22.3), `--walk all` 34/34, trace 9/9, route gate's tick-36 sector residue
+pre-existing. `--ai-live` skipped: windowed leg, box hazard.
