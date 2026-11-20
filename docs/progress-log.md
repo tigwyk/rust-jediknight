@@ -7813,3 +7813,24 @@ Gates on c9006143 (= 4b8af59, branch carries no delta, A/B trivially identical):
 `--ai`, `--soak`, `--tour`, `--cog-check` (0 stubbed), encounter gate 0 failures (13 paired
 hits, settled 22.0 vs 22.3), `--walk all` 34/34, trace 9/9, route gate's tick-36 sector residue
 pre-existing. `--ai-live` skipped: windowed leg, box hazard.
+### Round: #94 the recovered handlers as transliterations (tick/94-handlers, 3911db4 + merge ce2c1bb)
+
+`sithAICmd_LookForTarget` (0x50aa80), `sithAICmd_OpenDoors` (0x50abc0), `sithAICmd_HitAndRun`
+(0x50bb90) and `sithAICmd_LobFire` (0x509cd0, the scheduler branch #93 left to this ticket) are
+engine-named functions replacing their re-derived dispatch arms. New constants read from the
+shipped image: `_DAT_00523294 = 0.0` (LookForTarget arg0 rewrite to 500), `_DAT_005232f4 = -1000.0`
+(HitAndRun's per-pass second), `0x522af8 = (0,0,0)` (branch B's SetHeadPYR), and the soundclass
+mode table base `0x54b408` (mode 0x4c = `alert`, 0x52 = `flee`) — the earlier "5 = moving" read is
+off by one (5 = lwalkhard; 4 = moving). HitAndRun now counts on the mode word's 0x400 (which
+PrimaryFire sets on every committed fire) instead of the port's last_shot window, clears 0x800 on
+the re-engage pass, and hands the target to the withdraw walk. LobFire fires `sithAI_FireWeapon`
+with fl = 2, arms the fire lockout `ai + 0xa2` at `now + arg0`, and stops the fight on a 0x202
+player.
+
+Headless gate note: the encounter gate under `BK_HEADLESS=1 BK_SKIP_WINDOW=1` needs
+`BK_EXIT_FRAMES=300` — the windowed gate's real stop is the frame-297 screenshot, and a headless
+run without the frame budget overruns 23 frames (one extra shot at 10 433 ms, 399 extra actor
+samples) or truncates the trace at 297 (false kills). At 300 the gate is 0 failures, and the port's
+encounter trace is byte-identical to the 3aa3765 baseline binary under the same invocation. Also:
+`BK_ENCOUNTER_OUT` exported in a shell flips `encounter_events_enabled` for the unit tests — run
+`cargo test` with it unset.
