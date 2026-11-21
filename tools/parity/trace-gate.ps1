@@ -1,14 +1,16 @@
 <#
 .SYNOPSIS
-Phase 1 step 3's gate: the port's movement trace must match retail's on the captured walk legs.
+Phase 1 step 3's drift report: the port's movement trace against retail's on the captured walk legs.
 
 .DESCRIPTION
-Retail is the oracle: each leg in `walk-shots.tsv` has a retail trace (`<leg>-walk.tsv`, captured by
+Each leg in `walk-shots.tsv` has a retail trace (`<leg>-walk.tsv`, captured by
 `retail-capture.ps1 -WalkTraceMs`) and the port's replay is produced by `port-trace.ps1`. That replay
 is the app's own runtime step (`walk_player` -> `Runtime::step_player`), and the headless walkability
 preflight drives the same step through `--walk`, so the gate measures the motion path the game runs,
-not a second walker beside it. This gate records the port trace and then compares, failing when a
-leg's displacement or sector progress diverges beyond what the harness explains.
+not a second walker beside it. This script records the port trace and then compares. A leg whose
+displacement or sector progress diverges beyond what the harness explains prints `DRIFT`; it fails
+only when a leg cannot be recorded or compared. The decomp is the spec (Principle 1): a drifted leg is
+examined against it, never tuned back inside the tolerance.
 
 Tolerances, with their reasons:
   * travel within 25% of retail - the retail trace's clock is held-key game time and its first segment
@@ -17,7 +19,7 @@ Tolerances, with their reasons:
   * at most 2 sector mismatches out of the samples - the samples are 600 ms apart while the traces are
     60 Hz, so a sector change can fall between samples on one side and not the other.
 
-The gate is deliberately not a regression test of exact numbers: it fails on a rule change (speed,
+The report is deliberately not a regression test of exact numbers: it flags a rule change (speed,
 basis, collision) while tolerating the harness's timing noise.
 
 .EXAMPLE
@@ -75,6 +77,7 @@ $FixtureDir = Join-Path $PSScriptRoot 'walktrace'
 # never sent to the retail harness. This is what stops the QA window being spent on unusable legs (round
 # 251 — three of the default 15 do not move in the port).
 $failed = 0
+$drifted = 0
 # `-File` binds a list as one string, so the array goes through `-Command` (the same reason the other
 # harness scripts use it for `-Only`).
 $Only = @(Split-CommaList $Only)
@@ -141,14 +144,13 @@ foreach ($leg in $Only) {
     $travelOk = $ratio -ge 0.60 -and $ratio -le 1.40
     $ratioText = "{0,6:P0}" -f $ratio
   }
-  # `walk_cantina` is the furniture leg: its samples pass through the cantina bar, and the port has no
-  # thing collision yet (the ledger's "thing collision is absent"), so its *path* through the rooms is
-  # a consequence of that known deviation rather than of movement code. It is gated on travel and the
-  # stop pose; its sector line is reported and recorded, not failed on. Every other leg gates sectors.
-  $sectorOk = if ($leg -eq 'walk_cantina') { $true } else { $mismatch -le 2 }
-  $verdict = if ($travelOk -and $sectorOk) { 'PASS' } else { 'FAIL'; $failed++ }
-  Write-Host ("{0}  {1,-14} port {2,5:N2} / retail {3,5:N2} units ({4})  sectors off {5}  travel-ok {6} sectors-ok {7}  xy {8:N3} z {9:N3}" -f `
-      $verdict, $leg, $portTravel, $retailTravel, $ratioText, $mismatch, $travelOk, $sectorOk, $xy, $dz)
+  $sectorOk = $mismatch -le 2
+  # A leg outside its tolerance is drift, not a failure (user decision after spec #99): the retail
+  # traces are confounded by clock quantisation, run-to-run variance and the AI window (#106), so the
+  # decomp decides correctness and a drifted leg is examined against it, never tuned back.
+  $verdict = if ($travelOk -and $sectorOk) { 'PASS' } else { 'DRIFT'; $drifted++ }
+  Write-Host ("{0} {1,-14} port {2,5:N2} / retail {3,5:N2} units ({4})  sectors off {5}  travel-ok {6} sectors-ok {7}  xy {8:N3} z {9:N3}" -f `
+      $verdict.PadRight(5), $leg, $portTravel, $retailTravel, $ratioText, $mismatch, $travelOk, $sectorOk, $xy, $dz)
 }
-Write-Host ("trace gate: {0} leg(s), {1} failure(s)" -f $Only.Count, $failed)
+Write-Host ("trace gate: {0} leg(s), {1} drift(s), {2} failure(s)" -f $Only.Count, $drifted, $failed)
 if ($failed -gt 0) { exit 1 }

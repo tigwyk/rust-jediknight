@@ -39,11 +39,12 @@
     5. self-check — a copy of the trace with one position moved 0.25 units is **rejected** by the
        comparator, so the gate is known to fail on a perturbed trace and pass on the unmodified one.
        `-Perturb` runs that check; the gate's normal run compares the unmodified trace;
-    6. retail parity — when the manifest names a `retail` prefix, the replay matches it within the
+    6. retail drift — when the manifest names a `retail` prefix, the replay is compared with it at the
        **epsilon the fixture states** (`# epsilon <units>` in its header), over the rows before the
        plan's warp the manifest names (the port-only segment starts there). Sectors stay exact inside
-       the comparator. A level without a retail prefix says so (`SKIP`); its port oracle is
-       port-side evidence, not parity;
+       the comparator. A difference prints `DRIFT` and does **not** fail the gate: the decomp is the
+       spec, and the frozen capture is a regression signal to read against it. A level without a
+       retail prefix says so (`SKIP`); its port oracle is port-side evidence, not parity;
     7. mechanic provenance — the manifest's `provenance` file names the engine function and address
        behind every mechanic its `mechanics` row lists. A row still on re-derived code must name its
        deviation-ledger entry, and an entry the ledger does not carry fails;
@@ -581,11 +582,14 @@ if (-not $RetailPath) {
   } finally {
     Remove-Item Env:BK_ROUTE_EPSILON -ErrorAction SilentlyContinue
   }
+  # A drift report, not a verdict (user decision after spec #99): the frozen retail capture is confounded
+  # by its clock quantisation and its AI window (#106), so a port change that follows the decomp may
+  # move these rows without being wrong. Read the drift against the decomp; never tune it back.
   if (-not $retailOk) {
-    Write-Host ("FAIL  retail: the replay differs from {0} beyond {1}" -f $man.Retail, $tolerance)
-    exit 1
+    Write-Host ("DRIFT retail: the replay differs from {0} beyond {1} (reported, not failed; see the mismatches above)" -f $man.Retail, $tolerance)
+  } else {
+    Write-Host ("PASS  retail: the replay matches {0} within {1} over the {2} row(s) before the {3} warp at tick {4}" -f $man.Retail, $tolerance, ($sliceRows.Count - 1), $man.RetailWarp, $cutTick)
   }
-  Write-Host ("PASS  retail: the replay matches {0} within {1} over the {2} row(s) before the {3} warp at tick {4}" -f $man.Retail, $tolerance, ($sliceRows.Count - 1), $man.RetailWarp, $cutTick)
 }
 
 # 5. Mechanic provenance (issue #14 AC2). Every mechanic the route exercises names the engine

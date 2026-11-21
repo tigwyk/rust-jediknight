@@ -12,8 +12,9 @@
   inventory bin 60 shields, the thing array for actors and projectiles, the engine game clock);
   `port-encounter.ps1` runs the port's runtime and writes its own timeline. This gate reports the
   timing delta of every shot and hit, each paired hit's own health/shield split, the kill order, and
-  the actor state delta at each cadence sample, then exits non-zero when any of them leaves its
-  tolerance. It is the instrument tickets #11 (AI timing) and #12 (combat timing) measure against.
+  the actor state delta at each cadence sample. A comparison outside its tolerance prints `DRIFT`
+  and does not fail the run; missing data, a nondeterministic port and the fixture self-checks do.
+  It is the instrument tickets #11 (AI timing) and #12 (combat timing) measured against.
 
   The chronology says **hit or miss for every shot**: the port writes a `shot` row at the launch of
   a shot that lands on the player (`detail: target <thing> hit`), a `miss` row for one that dies
@@ -126,6 +127,14 @@ $failures = 0
 function Fail([string]$Message) {
   Write-Host "FAIL  $Message"
   $script:failures++
+}
+# A retail comparison outside its tolerance is drift, not a failure (user decision after spec #99):
+# the frozen capture shares the engine's `rand()` and its harness clock, so the decomp decides
+# correctness. Missing data, nondeterminism and the fixture's own self-checks still fail.
+$drifts = 0
+function Drift([string]$Message) {
+  Write-Host "DRIFT $Message"
+  $script:drifts++
 }
 function Num([string]$Text) {
   if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
@@ -282,7 +291,7 @@ if ($retailPlayers.Count -eq 0 -or $portPlayers.Count -eq 0) {
 } else {
   $durationDelta = [math]::Abs($portPlayers[-1].T - $retailPlayers[-1].T)
   if ($durationDelta -gt $DurationToleranceMs) {
-    Fail ("duration differs by {0:N0} ms (retail {1:N0}, port {2:N0}; tolerance {3:N0})" -f $durationDelta, $retailPlayers[-1].T, $portPlayers[-1].T, $DurationToleranceMs)
+    Drift ("duration differs by {0:N0} ms (retail {1:N0}, port {2:N0}; tolerance {3:N0})" -f $durationDelta, $retailPlayers[-1].T, $portPlayers[-1].T, $DurationToleranceMs)
   } else {
     Write-Host ("PASS  duration: retail {0:N0} ms, port {1:N0} ms, delta {2:N0} ms" -f $retailPlayers[-1].T, $portPlayers[-1].T, $durationDelta)
   }
@@ -291,7 +300,7 @@ if ($retailPlayers.Count -eq 0 -or $portPlayers.Count -eq 0) {
 # ---- shots ------------------------------------------------------------------------------------
 Write-Host ("shots: retail {0}, port {1} (port misses {2})" -f $retailShotSeries.Count, $portShotSeries.Count, $portMisses.Count)
 if ($retailShotSeries.Count -ne $portShotSeries.Count) {
-  Fail ("shot count differs (retail {0}, port {1}): {2} unpaired shot(s)" -f `
+  Drift ("shot count differs (retail {0}, port {1}): {2} unpaired shot(s)" -f `
       $retailShotSeries.Count, $portShotSeries.Count, [math]::Abs($retailShotSeries.Count - $portShotSeries.Count))
 }
 $shotDeltas = @()
@@ -316,7 +325,7 @@ if ($shotDeltas.Count -gt 0) {
   $maxAbs = ($shotDeltas | ForEach-Object { [math]::Abs($_) } | Measure-Object -Maximum).Maximum
   $meanAbs = ($shotDeltas | ForEach-Object { [math]::Abs($_) } | Measure-Object -Average).Average
   Write-Host ("      per-shot timing delta: max {0:N0} ms, mean {1:N0} ms over {2} paired shot(s) (tolerance {3:N0})" -f $maxAbs, $meanAbs, $shotDeltas.Count, $ShotToleranceMs)
-  if ($maxAbs -gt $ShotToleranceMs) { Fail ("shot timing delta {0:N0} ms exceeds {1:N0} ms" -f $maxAbs, $ShotToleranceMs) }
+  if ($maxAbs -gt $ShotToleranceMs) { Drift ("shot timing delta {0:N0} ms exceeds {1:N0} ms" -f $maxAbs, $ShotToleranceMs) }
 
   # Fire cadence: the interval between consecutive shots, which is the cadence itself. Pairing
   # absolute times cannot answer it — a paired delta carries the flight and any phase the series
@@ -364,7 +373,7 @@ if ($shotDeltas.Count -gt 0) {
     Write-Host ("      cadence intervals (sorted): retail [{0}], port [{1}] ms; max delta {2:N0} over {3} (tolerance {4:N0})" -f `
         (($retailIntervals | ForEach-Object { [math]::Round($_) }) -join ','), (($portIntervals | ForEach-Object { [math]::Round($_) }) -join ','), $cadenceMax, $cadenceCount, $ShotCadenceToleranceMs)
     if ($cadenceMax -gt $ShotCadenceToleranceMs) {
-      Fail ("shot cadence delta {0:N0} ms exceeds {1:N0} ms" -f $cadenceMax, $ShotCadenceToleranceMs)
+      Drift ("shot cadence delta {0:N0} ms exceeds {1:N0} ms" -f $cadenceMax, $ShotCadenceToleranceMs)
     } else {
       Write-Host ("PASS  shot cadence: {0} interval(s) within {1:N0} ms" -f $cadenceCount, $ShotCadenceToleranceMs)
     }
@@ -374,7 +383,7 @@ if ($shotDeltas.Count -gt 0) {
 # ---- hits -------------------------------------------------------------------------------------
 Write-Host ("hits: retail {0}, port {1}" -f $retailHits.Count, $portHits.Count)
 if ($retailHits.Count -ne $portHits.Count) {
-  Fail ("hit count differs (retail {0}, port {1}): {2} unpaired hit(s)" -f `
+  Drift ("hit count differs (retail {0}, port {1}): {2} unpaired hit(s)" -f `
       $retailHits.Count, $portHits.Count, [math]::Abs($retailHits.Count - $portHits.Count))
 }
 $hitCount = [math]::Min($retailHits.Count, $portHits.Count)
@@ -412,11 +421,11 @@ for ($i = 0; $i -lt $hitCount; $i++) {
       ($i + 1), $r.T, $r.Health, $r.Shields, $rHealthLost, $rShieldsLost, $p.T, $p.Health, $p.Shields, $pHealthLost, $pShieldsLost, $delta, $dHealth, $dShields, $dSplitHealth, $dSplitShields)
 }
 if ($hitCount -gt 0) {
-  if ($hitMax -gt $HitToleranceMs) { Fail ("hit timing delta {0:N0} ms exceeds {1:N0} ms" -f $hitMax, $HitToleranceMs) }
-  if ($healthMax -gt $HealthTolerance) { Fail ("per-hit health bar delta {0:N1} exceeds {1:N1}" -f $healthMax, $HealthTolerance) }
-  if ($shieldMax -gt $ShieldsTolerance) { Fail ("per-hit shields bar delta {0:N1} exceeds {1:N1}" -f $shieldMax, $ShieldsTolerance) }
-  if ($splitHealthMax -gt $HealthTolerance) { Fail ("per-hit health split delta {0:N1} exceeds {1:N1}" -f $splitHealthMax, $HealthTolerance) }
-  if ($splitShieldMax -gt $ShieldsTolerance) { Fail ("per-hit shield split delta {0:N1} exceeds {1:N1}" -f $splitShieldMax, $ShieldsTolerance) }
+  if ($hitMax -gt $HitToleranceMs) { Drift ("hit timing delta {0:N0} ms exceeds {1:N0} ms" -f $hitMax, $HitToleranceMs) }
+  if ($healthMax -gt $HealthTolerance) { Drift ("per-hit health bar delta {0:N1} exceeds {1:N1}" -f $healthMax, $HealthTolerance) }
+  if ($shieldMax -gt $ShieldsTolerance) { Drift ("per-hit shields bar delta {0:N1} exceeds {1:N1}" -f $shieldMax, $ShieldsTolerance) }
+  if ($splitHealthMax -gt $HealthTolerance) { Drift ("per-hit health split delta {0:N1} exceeds {1:N1}" -f $splitHealthMax, $HealthTolerance) }
+  if ($splitShieldMax -gt $ShieldsTolerance) { Drift ("per-hit shield split delta {0:N1} exceeds {1:N1}" -f $splitShieldMax, $ShieldsTolerance) }
   # The combat-damage dimension on its own: every paired hit's split and the bars after it,
   # independent of when the hits landed.
   if ($healthMax -le $HealthTolerance -and $shieldMax -le $ShieldsTolerance -and `
@@ -434,7 +443,7 @@ $retailKills = @(Get-KillOrder $retailRows)
 $portKills = @(Get-KillOrder $portRows)
 Write-Host ("kill order: retail [{0}], port [{1}]" -f ($retailKills -join ','), ($portKills -join ','))
 if (($retailKills -join ',') -ne ($portKills -join ',')) {
-  Fail ("kill order differs: retail [{0}], port [{1}]" -f ($retailKills -join ','), ($portKills -join ','))
+  Drift ("kill order differs: retail [{0}], port [{1}]" -f ($retailKills -join ','), ($portKills -join ','))
 } else {
   Write-Host ("PASS  kill order: {0} kill(s) on both sides, the same sequence" -f $retailKills.Count)
 }
@@ -447,9 +456,9 @@ if ($retailPlayers.Count -gt 0 -and $portPlayers.Count -gt 0) {
   # per-hit detail is in the hit list.
   $dHealth = [math]::Abs([double]$p.Health - [double]$r.Health)
   $dShields = [math]::Abs([double]$p.Shields - [double]$r.Shields)
-  if ($dHealth -gt $HealthTolerance) { Fail ("settled health {0:N1} vs retail {1:N1} (delta {2:N1} exceeds {3:N1})" -f $p.Health, $r.Health, $dHealth, $HealthTolerance) }
+  if ($dHealth -gt $HealthTolerance) { Drift ("settled health {0:N1} vs retail {1:N1} (delta {2:N1} exceeds {3:N1})" -f $p.Health, $r.Health, $dHealth, $HealthTolerance) }
   else { Write-Host ("PASS  settled health: port {0:N1}, retail {1:N1} (delta {2:N1})" -f $p.Health, $r.Health, $dHealth) }
-  if ($dShields -gt $ShieldsTolerance) { Fail ("settled shields {0:N1} vs retail {1:N1} (delta {2:N1} exceeds {3:N1})" -f $p.Shields, $r.Shields, $dShields, $ShieldsTolerance) }
+  if ($dShields -gt $ShieldsTolerance) { Drift ("settled shields {0:N1} vs retail {1:N1} (delta {2:N1} exceeds {3:N1})" -f $p.Shields, $r.Shields, $dShields, $ShieldsTolerance) }
   else { Write-Host ("PASS  settled shields: port {0:N1}, retail {1:N1} (delta {2:N1})" -f $p.Shields, $r.Shields, $dShields) }
 }
 
@@ -577,23 +586,23 @@ if ($compared -gt 0) {
   if ($steered -gt 0) {
     Write-Host ("      yaw: {0} sample(s) of actor(s) whose retail facing moved (animation or random) not compared absolutely" -f $steered)
   }
-  if ($posMax -gt $ActorPositionTolerance) { Fail ("actor position delta {0:N2} exceeds {1:N2} units" -f $posMax, $ActorPositionTolerance) }
-  if ($yawMax -gt $ActorYawTolerance) { Fail ("actor yaw delta {0:N1} exceeds {1:N1} deg" -f $yawMax, $ActorYawTolerance) }
-  if ($actorHealthMax -gt $ActorHealthTolerance) { Fail ("actor health delta {0:N1} exceeds {1:N1}" -f $actorHealthMax, $ActorHealthTolerance) }
+  if ($posMax -gt $ActorPositionTolerance) { Drift ("actor position delta {0:N2} exceeds {1:N2} units" -f $posMax, $ActorPositionTolerance) }
+  if ($yawMax -gt $ActorYawTolerance) { Drift ("actor yaw delta {0:N1} exceeds {1:N1} deg" -f $yawMax, $ActorYawTolerance) }
+  if ($actorHealthMax -gt $ActorHealthTolerance) { Drift ("actor health delta {0:N1} exceeds {1:N1}" -f $actorHealthMax, $ActorHealthTolerance) }
 }
 # The set difference is the structural half: an actor retail reports at a cadence sample and the
 # port does not, or the reverse, fails. Extras are not "phantom": a port actor retail never had is
 # exactly the invented-actor case the gate exists to catch.
 if ($unmatchedRetail.Count -gt 0) {
-  Fail ("{0} retail actor(s) have no port actor ({1})" -f `
+  Drift ("{0} retail actor(s) have no port actor ({1})" -f `
       $unmatchedRetail.Count, (($unmatchedRetail | ForEach-Object { '{0}@{1:N0} ms' -f $_.Thing, $_.T }) -join ','))
 }
 if ($unmatchedPort.Count -gt 0) {
-  Fail ("{0} port actor(s) have no retail actor ({1})" -f `
+  Drift ("{0} port actor(s) have no retail actor ({1})" -f `
       $unmatchedPort.Count, (($unmatchedPort | ForEach-Object { '{0}@{1:N0} ms' -f $_.Thing, $_.T }) -join ','))
 }
-if ($missing -gt 0) { Fail ("{0} mapped retail actor sample(s) have no port actor" -f $missing) }
-if ($extra.Count -gt 0 -and $unmatchedPort.Count -eq 0) { Fail ("{0} port actor sample(s) have no retail actor" -f $extra.Count) }
+if ($missing -gt 0) { Drift ("{0} mapped retail actor sample(s) have no port actor" -f $missing) }
+if ($extra.Count -gt 0 -and $unmatchedPort.Count -eq 0) { Drift ("{0} port actor sample(s) have no retail actor" -f $extra.Count) }
 
-Write-Host ("encounter gate: {0} failure(s)" -f $failures)
+Write-Host ("encounter gate: {0} drift(s), {1} failure(s)" -f $drifts, $failures)
 if ($failures -gt 0) { exit 1 }
