@@ -7914,3 +7914,157 @@ t = 0.77 s) and fires, because the port's AI scheduler is still an approximation
 move the replay's tick 0. Open question for the user: retail's Rodian 207 (and the cantina actors 181,
 182, 272) positions at the route's tick 0, which only a retail `coords`/thing dump at the route start
 can answer.
+
+## #109: the tick skeleton (spec #108)
+
+`sithUpdate` (`0x4c4c00`) now runs in the engine's order from one Bevy system, `sith_update`:
+`sithTime_Advance`, the sound mixer and events (`Runtime::sith_update_head`), `sithAI_Process`
+(`ai_tick`, skipped under `--no-ai`), `sithSurface_Tick` (`Runtime::sith_surface_tick`), and
+`sithThing_Update` (`Runtime::sith_thing_update`, `0x4cc1e0`). `read_controls` (`sithControl_Update`)
+runs before it and `place_camera` after it; the pulse, timer, sleep and message systems
+(`sithCog_ProcessCogs`) are ordered after it. `walk_player`, `ai_shots` and `advance_sim` are gone.
+
+`Runtime::step` is split into the engine's per-thing slots instead of whole-world passes: lifetime,
+`sithCog_UpdateThingTimer` (timer and pulse), the type arms (`sithWeapon_Update`'s damage decay,
+`sithPlayer_Update`'s tint and mana), physics or the frame path with `RotatePivot` and `arrived`, and
+the puppet slot (a thing-track `PlayKey`). The player's body moves at its own thing index through a
+callback the loop calls with the runtime released. `sithThing_UpdateMove` (`0x4cc4c0`) is one function,
+`Solids::update_move`, which the player's sub-steps and `move_gravity_body` both call; it adds the
+`+0x34 & 8` hold the port's inline copies lacked. Remainders keep named slots: the AI walk (#110),
+`sithActor_Update` (#111), explosions, particles, the weapon movement arms, the puppet and
+`sithSurface_Tick`'s internals.
+
+A/B against `d760bb1` (same session): the unit suite (474) and `--ai`, `--things`, `--collide`,
+`--fall`, `--pickup`, `--hit`, `--attach`, `--walk all`, `--soak-all`, `--tour`, `--cog-check` pass on
+both. The trace gate is identical (2 drifts: `walk_cantina` 24 %, `walk6_spawn` 5 sectors). Every
+route trace (levels 1, 2 and the 2/3/4/6 chains) is byte-identical to the baseline's. The audio trace
+differs in one one-shot gain (0.626 to 0.627) and the encounter trace's hits land one or two frames
+earlier (a shot fired in `sithAI_Process` now flies in the same frame's thing loop, as in the engine);
+the encounter gate reads 0 drifts on both.
+
+Oracles re-recorded, with their reasons:
+
+- `level1-route-port.tsv`, `level1-audio-port.tsv`, `level1-audio-door-port.tsv` and
+  `level1-audio-schedule.tsv`: the game install's `Resource/Res1hi.gob` was a 68-byte stub from
+  Nov 18 until the user repaired it, so the oracles re-recorded in that window (#99's) carry no
+  one-shots (`landbasic01.wav`, `reeyee02.wav`, the trooper shots). The baseline build reproduces the
+  new files exactly except the one gain above. The audio oracle's ambient volume 0.3 at ticks 36-180
+  (sector 339 against 349) is #99's spawn wedge (#106).
+- `audio-gate.ps1`: its retail comparisons (the route state and the door fade) now report `DRIFT`,
+  like the other gates (#107). Its one-shot self-check chose a once-only wav; with the sounds back,
+  every wav recurs, so it now chooses a row whose wav does not recur within 72 ticks.
+
+Open, pre-existing (the baseline fails the same way): the level-2 route and the 2/3/4/6 chain route
+gates fail their port oracles on position (level 2 tick 36: sector 22 against 29).
+
+## #110: AI moves through physics (spec #108)
+
+An AI actor now moves only the engine's way. `sithAI_SetMoveThing` (`0x4eac90`) stores the move
+position and movespeed and sets AI flag `0x1`; the world tick's per-thing slot runs `sithAI_Tick`
+(`0x4ea5e0`, `Runtime::sith_ai_tick`), whose move arm `sithAI_idk_msgarrived_target` (`0x4ea890`)
+adds `movespeed × maxthrust × dt` to the body's velocity toward the point. Physics then moves the
+body through its own sweep, drag and floor attach. The arm's branches are transliterated: the
+`0x1000`/`0x40000` early return, the walker's zeroed z, the flyer stop (`FindSectorInRadius`,
+`0x4e71b0`, into water), the attached walker's `sithAI_CanWalk` (`0x4eb4b0`, with `0x4eb640`) at
+`pos + vel × dt`, which zeroes the velocity and emits `0x400` on 0, and the arrival test at
+`moveSize` (velocity zeroed, flag `0x1` cleared, `arrived` sent, `0x800` emitted). The default
+movespeed is `sithAI_Create`'s 1.5 (`0x3fc00000`); `AISetMoveSpeed` clamps to 0..2, and the
+`AISetMovePos`/`AISetMoveFrame`/`AISetMoveThing` verbs (`0x500cd0`, `0x500da0`, `0x500e00`) pass
+the AI's own movespeed. The `returnhome` handler's `0x100` and `0x800` arms and `roam`
+(`0x50b830`) are ported; both order moves through `SetMoveThing`.
+
+Deleted, because each was a position-writing stand-in: the chase, strafe, route, flee and listen
+walks, `circlestrafe`'s ring, the remembered-spot walk, `settle_walked`, the per-tick overlap test
+for event 4 (the `(2,10)` contact raises it now), round 307's cylinder refusal, `walk_vel`, and the
+floor probes only they used (`resting_floor`, `prop_floor`, `in_search`, `heard_event`). The
+handlers whose moves are not ported keep no walk and are named on the ledger's AI remainder row:
+`follow` (`0x5093f0`), `listen` (`0x50a6f0`; its audibility constants, recorded here so they are
+not lost: `_DAT_005232c8` = 1.0 unit and `_DAT_005232a0` = 0.5, cos 60°), `circlestrafe`
+(`0x509890`), `withdraw`/`flee` (`0x50b150`, `0x50aeb0`).
+
+An `_humanactor` (maxthrust 0.8, surfdrag 3) settles at `a (1 − 3 dt) / 3` = 0.36 u/s at 30 Hz with
+`a` = 1.5 × 0.8; the unit test pins that value.
+
+A/B against #109 (`05b1872`), same session: the unit suite (461 after the stand-in tests were
+deleted) and `--ai`, `--things`, `--collide`, `--fall`, `--pickup`, `--hit`, `--attach`,
+`--walk all`, `--soak-all`, `--tour`, `--cog-check` pass. The trace gate is unchanged (2 drifts:
+`walk_cantina` 24 %, `walk6_spawn` 5 sectors), the encounter gate reads 0 drifts, and the level-2 and
+2/3/4/6 chain route outputs are identical to #109's.
+
+Oracles re-recorded, with their engine reason: the route gate runs with `--no-ai`, which in retail
+(`-devMode disableai`) skips only `sithUpdate`'s `sithAI_Process` call. `sithAI_Tick` is in the
+per-thing loop and still runs, so a scripted move (`01_initialry.cog`'s `AISetMovePos`) walks
+under `--no-ai`, where the old stand-in walk ran only inside `ai_tick`. Level 1's spawn changes:
+
+| tick | retail | #109 port | #110 port |
+|------|--------|-----------|-----------|
+| 36 | -10.25, -5.06, s349 | -10.24, -5.41, s339 | -10.24, -5.41, s339 |
+| 72 | -9.84, -4.75, s349 | -10.24, -5.38, s339 | -10.24, -5.24, s339 |
+| 108 | -9.76, -4.75, s349 | -10.24, -5.35, s339 | -10.25, -5.03, s349 |
+| 144 | -9.76, -4.75, s349 | -10.24, -5.29, s339 | -9.96, -4.89, s349 |
+
+The spawn wedge (#106) eases: the body reaches sector 349 by tick 108, where retail is there by
+tick 36. `level1-route-port.tsv` changes at ticks 72-144, and `level1-audio-port.tsv` and
+`level1-audio-schedule.tsv` follow it: the ambient volume reads 0.4/0.5 in sector 349, and the
+trooper shots in the first 3 s are 3 instead of 4 (ticks 66, 84, 154), with gains that move with the
+body. Later ticks are unchanged. The audio gate reads 1 drift and 0 failures.
+
+#106, port side: the Rodian (thing 207, `01_initialry.cog`) stands at
+`(-10.273, -5.225, -1.119)` at 1.2 s; the `d760bb1` build's stand-in walk had it at `(-10.295, -5.119, -1.100)`.
+Its scripted move starts near 1.0 s and the body accelerates from rest through the move arm. The
+retail positions of 207 and the cantina actors at route tick 0 are still the open question on #106.
+
+## #111: the per-thing arms (spec #108)
+
+`sithThing_Update`'s (`0x4cc1e0`) remaining per-thing arms are ported:
+
+- `sithActor_Update` (`0x4ecbe0`) runs for actors and, after `sithPlayer_Update`, for the player.
+  The air clock (`Runtime::air_ms`) grows underwater; from 20 001 ms the actor takes
+  `DamageThing(self, self, 10.0, 0x20)` and the clock drops 2 000. Out of water it plays `breath`
+  (`0x45`, over 10 000 ms) or `gasp` (`0x46`, over 18 000 ms) and resets. The mode names were read
+  from the image's sound-mode table at `0x54b408`.
+- The lifetime arm calls each type's destroy function: `sithActor_DestroyActor` (`0x4ed760`, the
+  actor becomes a type-9 corpse with 20 000 ms), `sithWeapon_DestroyWeapon` (`0x4d5160`, the
+  `explode=` thing for typeflag `0x100`, the 2.0 awareness event for the player's weapons), and
+  `sithThing_DestroyThing` (`0x4cc7a0`, flag 2 and `removed` to a cog-linked thing) for items,
+  corpses, particles and the default case. The player's type does nothing. The `destroything` cog
+  verb (`FUN_00502600`) now calls the same `DestroyThing`.
+- The destroyed-thing arm (`0x4cc1e0:95-138`) runs for a flag-2 thing: detach, exit the sector
+  (`exited` to a cog-linked sector), `sithAI_Free`, the puppet's key, type 0 and the free-index
+  stack.
+- `sithPlayer_Update` (`0x4c89d0`) was read. The tint decay now clamps to 1.0 as the engine does.
+
+Named remainders, each with a shortcut comment at its site: the corpse and item 3 000 ms deferral
+for a thing drawn last frame (the runtime does not know what was drawn), `DestroyItem`'s respawn
+branch (the port's `respawning` queue handles taken items), `DestroyParticle`'s element shedding,
+`DestroyActor`'s closing `FindFloor`, `sithSoundMixer_FreeThing`, slot reuse at creation (the port
+appends), and in `sithPlayer_Update` the add-light byte decay, the player's weapon state and
+`SendFire` calls, and the pit-fall death arm (sector flag `0x40`).
+
+A/B against #110 (`325c08f`), same session: the unit suite (465) and the eleven port checks pass.
+The trace, encounter, audio and level-1 route gates read the same as #110 against the oracles
+re-recorded there, and the level-2 and chain route outputs are identical. No oracle changes.
+
+## #112: the spec #108 contract
+
+The ledger and the stage table are refreshed for the world tick: *AI walkability* is retired by
+#110, *thing-vs-thing collision* no longer names the unswept actor walk, the *AI named remainders*
+row names the five unported movers, a new *world tick remainders* row names every slot the port
+does not run yet, the *puppet clip timing* row no longer reads `walk_vel`, and stages 2, 5 and 6
+carry the spec's results. `src/` keeps no `ai_can_walk` stand-in, `walk_vel`, `settle_walked`,
+`sector_route` or `ai_route`.
+
+#106, port side. At route tick 0 nothing has run, so each actor stands where the level places it
+(`01narshadda.jkl`):
+
+| thing | template | position | sector |
+|-------|----------|----------|--------|
+| 207 (Rodian, `ryinitial.ai`) | `reeyeesbhgun` | -10.269, -5.245, -1.119 | 339 |
+| 181 | `reeyeesbhgun` | -2.774, -2.798, -1.169 | 254 |
+| 182 | `reeyeesgun` | -2.583, -2.942, -1.169 | 254 |
+| 272 (`pedroamnarsh.ai`) | `nman1` | -2.846, 10.946, 6.729 | 431 |
+
+With the AI running from load (the route plan without `--no-ai`, `BK_ACTOR_TRACE`), 181 has not
+moved after 40 frames and 207 is at -10.272, -5.229 (0.017 units, its scripted move starting). Only
+retail's own positions at that tick can say whether the spawn wedge's remaining 72 ticks come from
+an actor; that half stays on #106 for a user capture.

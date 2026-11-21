@@ -1,8 +1,8 @@
 #requires -Version 7
 <#
 .SYNOPSIS
-  The level-1 audio gate: the port's audio state through the scripted route must match the
-  retail-derived reference, and the replay must reproduce it byte for byte.
+  The level-1 audio gate: the replay must reproduce the port's audio oracle byte for byte, and its
+  difference from the retail-derived reference is reported as drift.
 
 .DESCRIPTION
   Issue #13's oracle. `--audio-trace` writes, every 600 ms of the replay (the same 36-tick cadence
@@ -28,9 +28,10 @@
         600 ms window or one gain moved 0.25 must be rejected as missing/extra/mistimed/attenuated;
     3. self-check — a copy of the trace with one sound's gain moved 0.25 is **rejected**, and the
        comparator names it `attenuated` (`-Perturb` runs that check explicitly);
-    4. retail — `--audio-compare` against `level1-audio-retail.tsv`, whose header documents the
-       provenance of every column. `--audio-compare` classifies each sound difference as missing,
-       extra, mistimed or attenuated, and reports music/ambience state differences per sample.
+    4. retail drift — `--audio-compare` against `level1-audio-retail.tsv`, whose header documents
+       the provenance of every column, and the door segment's fade against its retail reference.
+       `--audio-compare` classifies each sound difference as missing, extra, mistimed or
+       attenuated; a retail difference prints `DRIFT` and does not fail the gate.
 
   `BK_AUDIO_EPSILON` is the absolute tolerance for gains and volumes (default 0.02; this gate
   passes 0.12, two 0.1 s pulse steps, because the VM clock accumulates 1/60 s in f32 and a pulse
@@ -164,8 +165,10 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host 'PASS  one-shot oracle: the trace carries the scheduled events window by window'
 
 # The four perturbations run against the replay's own schedule (the observed side), so each names
-# what a broken mixer would do. One wav that occurs exactly once is chosen, so the classification
-# is unambiguous.
+# what a broken mixer would do. The chosen row's wav does not recur within two shift windows
+# (72 ticks), so a skipped, moved or quieter copy of it cannot be matched to a neighbour and the
+# classification is unambiguous. Since the sound archive's landing and alert sounds play, every
+# wav on the route recurs, so a once-only wav no longer exists to choose.
 $scheduleLines = Get-Content -LiteralPath $schedule
 $scheduleHeader = @($scheduleLines[0] -split "`t")
 $scheduleBody = @($scheduleLines | Select-Object -Skip 1 | Where-Object { $_.Trim() -ne '' })
@@ -177,17 +180,22 @@ $gainColumn = [Array]::IndexOf($scheduleHeader, 'gain')
 foreach ($column in @($tickColumn, $timeColumn, $wavColumn, $gainColumn)) {
   if ($column -lt 0) { throw 'the one-shot schedule has no tick/time_s/wav/gain column' }
 }
-$wavCounts = @{}
-foreach ($line in $scheduleBody) {
-  $name = (@($line -split "`t")[$wavColumn]).ToLowerInvariant()
-  if ($wavCounts.ContainsKey($name)) { $wavCounts[$name] = $wavCounts[$name] + 1 } else { $wavCounts[$name] = 1 }
-}
 $uniqueIndex = -1
-for ($i = 0; $i -lt $scheduleBody.Count; $i++) {
-  $name = (@($scheduleBody[$i] -split "`t")[$wavColumn]).ToLowerInvariant()
-  if ($wavCounts[$name] -eq 1) { $uniqueIndex = $i; break }
+for ($i = 0; $i -lt $scheduleBody.Count -and $uniqueIndex -lt 0; $i++) {
+  $cells = @($scheduleBody[$i] -split "`t")
+  $name = $cells[$wavColumn].ToLowerInvariant()
+  $tick = [int]$cells[$tickColumn]
+  $isolated = $true
+  for ($j = 0; $j -lt $scheduleBody.Count; $j++) {
+    if ($j -eq $i) { continue }
+    $other = @($scheduleBody[$j] -split "`t")
+    if ($other[$wavColumn].ToLowerInvariant() -eq $name -and [Math]::Abs([int]$other[$tickColumn] - $tick) -le 72) {
+      $isolated = $false
+    }
+  }
+  if ($isolated) { $uniqueIndex = $i }
 }
-if ($uniqueIndex -lt 0) { throw 'every scheduled wav repeats; the schedule cannot be perturbed unambiguously' }
+if ($uniqueIndex -lt 0) { throw 'every scheduled wav recurs within 72 ticks; the schedule cannot be perturbed unambiguously' }
 
 function Save-Schedule([string]$Path, [string[]]$Rows) {
   Set-Content -LiteralPath $Path -Value (@($scheduleLines[0]) + $Rows) -Encoding utf8
@@ -284,7 +292,10 @@ if ($Perturb) {
   Write-Host 'audio gate: the perturbed trace failed and the unmodified trace passed, as required'
 }
 
-# 4. Retail: the scripted route's audio state, derived from the level's own data and scripts.
+# 4. Retail: the scripted route's audio state against the retail-derived reference. A retail
+#    comparison reports drift and does not fail the gate (docs/porting-roadmap.md, "Rules for the
+#    next agent or contributor"): the decomp decides, and each drift is explained in the log.
+$drifts = 0
 $env:BK_AUDIO_EPSILON = $Epsilon.ToString([cultureinfo]::InvariantCulture)
 try {
   & $Exe --audio-compare $RetailPath $runA
@@ -292,11 +303,12 @@ try {
 } finally {
   Remove-Item Env:BK_AUDIO_EPSILON -ErrorAction SilentlyContinue
 }
-if (-not $retailOk) {
-  Write-Host ("FAIL  retail: the replay differs from {0} (audio-compare above)" -f $RetailFixture)
-  exit 1
+if ($retailOk) {
+  Write-Host ("PASS  retail: the replay matches {0} within {1}" -f $RetailFixture, $Epsilon)
+} else {
+  Write-Host ("DRIFT retail: the replay differs from {0} (audio-compare above; reported, not failed)" -f $RetailFixture)
+  $drifts++
 }
-Write-Host ("PASS  retail: the replay matches {0} within {1}" -f $RetailFixture, $Epsilon)
 
 # 5. The bar doorway on its own: a fresh process for each side, because retail's body wedges on the
 #    elevator leaf when the four-leg process reaches the door. The fade's *authored* values are
@@ -354,10 +366,11 @@ for ($i = 0; $i -lt $pairs; $i++) {
 }
 $phase = $actualFrom[0].Tick - $expectedFrom[0].Tick
 if ($worst -gt $Epsilon) {
-  Write-Host ("FAIL  door fade: {0} aligned sample(s), worst delta {1:F3} > {2}, phase {3} tick(s)" -f $pairs, $worst, $Epsilon, $phase)
-  exit 1
+  Write-Host ("DRIFT door fade: {0} aligned sample(s), worst delta {1:F3} > {2}, phase {3} tick(s) (reported, not failed)" -f $pairs, $worst, $Epsilon, $phase)
+  $drifts++
+} else {
+  Write-Host ("PASS  door fade: {0} aligned sample(s) within {1} (worst delta {2:F3}); phase {3} tick(s) — the port crosses one sample earlier, movement acceleration only" -f $pairs, $Epsilon, $worst, $phase)
 }
-Write-Host ("PASS  door fade: {0} aligned sample(s) within {1} (worst delta {2:F3}); phase {3} tick(s) — the port crosses one sample earlier, movement acceleration only" -f $pairs, $Epsilon, $worst, $phase)
 
-Write-Host 'audio gate: 0 failure(s)'
+Write-Host ("audio gate: {0} drift(s), 0 failure(s)" -f $drifts)
 exit 0

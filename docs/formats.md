@@ -1103,7 +1103,7 @@ gives sight and speed, not a path. It keeps the actors it moved in the private `
 `Runtime::step` consumes that list and settles each actor with the player's own `walker_step` sweep,
 before the step returns. The step takes the caller's geometry view (`Option<&Solids>`), so it keeps
 no settle-only duplicate handle for that view — `Runtime::solids` remains the movers' collider:
-`advance_sim` passes the level's `Collision` resource and `ai_shots` only drives `ai_tick`.
+`sith_update` passes the level's `Collision` resource to `sithThing_Update`'s loop and drives `ai_tick` in `sithAI_Process`'s slot.
 `--ai` exercises that path — it ticks the AI, shoves the walked body 0.4 units into a wall, and
 lets the step push it out and report the new pose — and the
 `step_settles_the_actors_it_walked` unit test covers the consume. The gate prints:
@@ -2924,12 +2924,8 @@ same function returns the speed to `sithPuppet_UpdatePuppet`, which calls
 `rdPuppet_AdvanceTrack(speed × dt × const)` — a locomotion clip advances with **distance
 moved**, not with the clock, which is why a walk cycle does not slide.
 
-The port has no physics velocity: `ai_tick` moves an actor by writing its position, so
-`Runtime::walk_vel` records the velocity each actor walked at (`(next - from) / dt`), and
-`locomotion_state` applies the same axis-and-threshold rule to it. A renderer-side
-displacement was tried first and is wrong — the sim ticks and the render frames do not line
-up (a 0.33 u/s walk measured 3.6 u/s), and `Runtime::step` re-seats an actor that ends up inside
-a wall, a push the `--ai` gate reports at 6.7 units, which reads as a sprint sideways. A
+Since #110 an actor moves through its own physics velocity (`sithAI_Tick`'s move arm pushes
+`ThingState::vel`), and `locomotion_state` applies the same axis-and-threshold rule to it. A
 script's `PlayKey` still overrides the choice, and a dead actor plays `death` once and holds
 the last frame. A state change restarts the clip, which is `sithPuppet_PlayMode` clearing
 `animStartedMs`.

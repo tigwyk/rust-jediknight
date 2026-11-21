@@ -947,6 +947,17 @@ impl MoveState {
     }
 }
 
+/// What [`Solids::update_move`] (`sithThing_UpdateMove`, `0x4cc4c0`) decided for one frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum UpdateMove {
+    /// Nothing moves.
+    Hold,
+    /// `sithPhysics_FindFloor(thing, 0)`: a physics rider of a path thing that moved nothing.
+    FindFloor,
+    /// `sithCollision_MoveThing` by `delta` with search flags `flags`.
+    Move { delta: [f32; 3], flags: u32 },
+}
+
 /// `sithCollision_Startup`'s pair-handler table (`DAT_00847f38`, indexed `mover*12 + hit`):
 /// whether the installed handler cell is non-zero. `sithCollision_AddCollisionHandler`
 /// (`0x4e6f40`) mirrors an asymmetric pair into the transposed cell with the swapped flag, so
@@ -1185,6 +1196,69 @@ impl LevelGeometry {
             }
         }
         None
+    }
+
+    /// `sithCollision_FindSectorInRadius` (`0x4e71b0`): the sector `to` lies in, reached from
+    /// `sector` by sweeping a `radius` sphere from `from`. A point already inside `sector`
+    /// (radius 0) answers it at once. Otherwise the first popped record that is not an adjoin
+    /// crossing (`& 0x20`) ends the walk and **clamps `to`** onto the sweep at its distance; each
+    /// crossing moves the answer into its far sector.
+    pub fn find_sector_in_radius(
+        &self, sector: usize, from: [f32; 3], to: &mut [f32; 3], radius: f32, gates: Gates<'_>,
+    ) -> usize {
+        if self.inside_sector_with_gates(sector, *to, 0.0, gates) {
+            return sector;
+        }
+        let mut dir = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+        let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+        if len > 0.0 {
+            dir = dir.map(|v| v / len);
+        }
+        let mut search = CollisionSearch::new();
+        self.search_for_collisions(sector, None, from, dir, len, radius, gates, 1, &mut search);
+        let mut here = sector;
+        while let Some(record) = search.pop() {
+            match record {
+                CollisionRecord::Crossing { sector, .. } => here = sector,
+                CollisionRecord::Solid(hit) => {
+                    *to = [0, 1, 2].map(|k| hit.distance * dir[k] + from[k]);
+                    return here;
+                }
+                CollisionRecord::Adjoin { .. } => {}
+            }
+        }
+        here
+    }
+
+    /// `sithAI_CanWalk_ExplicitSector` (`0x4eb640`): sweep the `mover`'s `radius` sphere straight
+    /// down from `dest` for `reach` (search flags `0x2002`) and judge the first answering record.
+    /// A surface answers 0 when its flags carry `8`, else 1 for a floor (`& 1`) and 2 for anything
+    /// else; a thing answers 1 when `thing_flags` of it carries `0x40`, else 0; nothing answers 0.
+    /// shortcut: the attach out-parameter (`param_4`) is dropped; no port caller passes one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ai_can_walk_in_sector(
+        &self, sector: usize, mover: &MoveState, mover_index: usize, dest: [f32; 3], reach: f32,
+        radius: f32, gates: Gates<'_>, thing_flags: impl Fn(usize) -> u32,
+    ) -> u32 {
+        let mut search = CollisionSearch::new();
+        search.exclude_thing(mover_index);
+        self.search_for_collisions(
+            sector, Some(mover), dest, [0.0, 0.0, -1.0], reach, radius, gates, 0x2002, &mut search,
+        );
+        while let Some(record) = search.pop() {
+            let CollisionRecord::Solid(hit) = record else { continue };
+            if hit.kind & 2 != 0 {
+                let flags = self.surface_flags.get(hit.surface).copied().unwrap_or(0);
+                if flags & 8 != 0 {
+                    return 0;
+                }
+                return 2 - u32::from(flags & 1 != 0);
+            }
+            if hit.kind & 1 != 0 {
+                return u32::from(hit.thing.is_some_and(|t| thing_flags(t.thing) & 0x40 != 0));
+            }
+        }
+        0
     }
 
     /// `sithCollision_SearchForCollisions` (0x4e8160): one shared thing/surface/adjoin stack.
@@ -1664,37 +1738,6 @@ impl LevelGeometry {
             }
         }
         false
-    }
-
-    /// Whether `other` is in the collision search of a sphere of `radius` swept `left` along `dir` from
-    /// `at` in `sector`. `sithCollision_SearchForCollisions` (`0x4e8160`) adds a sector only when the
-    /// sweep **reaches one of its adjoins**, so a crate in the next room (or in a trigger sliver inside
-    /// this one) collides once the body gets to the opening — while a body resting on a floor opening
-    /// and walking level (`18Ascend`'s spawn over its shaft) never reaches the leaves below it.
-    pub fn in_search(
-        &self,
-        sector: usize,
-        other: usize,
-        at: [f32; 3],
-        dir: [f32; 3],
-        left: f32,
-        radius: f32,
-    ) -> bool {
-        if other == sector {
-            return true;
-        }
-        self.portals.get(sector).is_some_and(|portals| {
-            portals.iter().any(|portal| {
-                if portal.adjoin != other {
-                    return false;
-                }
-                let now = dot(sub(at, portal.point), portal.normal);
-                let then = now + dot(dir, portal.normal) * left;
-                // Crossing the plane, or overlapping it by more than float dust on the way. A sphere
-                // that only touches it (a body standing on it) is not a contact.
-                now.signum() != then.signum() || now.abs().min(then.abs()) < radius - 1e-4
-            })
-        })
     }
 
     /// `sithCollision_SearchForThingCollisions` (`0x4e8430`): the searched sector's thing list,
@@ -2292,6 +2335,39 @@ impl LevelGeometry {
         }
     }
 
+    /// `sithThing_UpdateMove` (`0x4cc4c0`): what one thing's frame does with its move.
+    ///
+    /// - `+0x34 & 8` (an attach that carries the thing) moves nothing (`:20`).
+    /// - A physics thing (`move=physics`) moves by its frame displacement `+0x234`; any other
+    ///   mover by nothing, with `MoveThing` flag 4 (`:22-31`).
+    /// - A surface attach (`+0x34 & 1`) on a scrolling surface (`0x800`) adds `scroll * dt`
+    ///   (`:33-39`). `scroll` is `sithSurface_DetachThing`'s answer: zero unless the surface scrolls.
+    /// - A zero move of a physics thing attached to a path thing (`+0x34 & 6`, parent `move=path`)
+    ///   runs `sithPhysics_FindFloor(thing, 0)` (`:40-46`); any other zero move does nothing.
+    /// - Otherwise `sithCollision_MoveThing` runs with the displacement (`:48-51`).
+    ///
+    /// `parent_move` is the attached thing's move type (`+0x58 -> +0x10`), when there is one.
+    pub fn update_move(
+        state: &MoveState, displacement: [f32; 3], scroll: [f32; 3], dt: f32, parent_move: Option<u32>,
+    ) -> UpdateMove {
+        if state.attach_flags & 8 != 0 {
+            return UpdateMove::Hold;
+        }
+        let (mut delta, flags) = if state.move_type == 1 { (displacement, 0) } else { ([0.0; 3], 4) };
+        if state.attach_flags & 1 != 0 {
+            for axis in 0..3 {
+                delta[axis] += scroll[axis] * dt;
+            }
+        }
+        if delta == [0.0; 3] {
+            if state.move_type == 1 && state.attach_flags & 6 != 0 && parent_move == Some(2) {
+                return UpdateMove::FindFloor;
+            }
+            return UpdateMove::Hold;
+        }
+        UpdateMove::Move { delta, flags }
+    }
+
     /// `sithPhysics_ApplyDrag` (`0x4f5d50`): a body slower than `static_drag` stops dead;
     /// otherwise the velocity loses `min(drag * dt, 1.0)` of itself and components at or under
     /// `0x52319c` (1e-5) snap to zero.
@@ -2663,176 +2739,6 @@ impl LevelGeometry {
             scan(&all, &mut out);
         }
         out
-    }
-}
-
-/// The feet height and contact details reported by the authored AI placement probe.
-///
-/// `height` is the **feet** height, not the centre: a swept sphere stops with its centre one
-/// `radius` above a face, a sector plane and a solid thing's top are already feet heights, so every
-/// caller inverts it the same way (`height + radius`).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Rest {
-    /// The height the body's feet rest at.
-    pub height: f32,
-    /// How far below the body's centre the contact sits (`pos[2] - (height + radius)`).
-    pub travelled: f32,
-    /// The contact normal turned toward the body, so a ramp gives the direction it slides down.
-    /// A sector plane and a solid thing's top have none.
-    pub normal: Option<[f32; 3]>,
-}
-
-impl LevelGeometry {
-    /// AI positioning's recovery probe, not the live `FindFloor` attachment path.
-    ///
-    /// `shortcut: include the world-face, plane and model-top estimates until walked AI
-    /// drives the swept physics mover instead of directly placing its next position.`
-    /// Highest reachable estimate wins. `reach` limits the drop and `lift` permits the
-    /// plane query's 0.05 tolerance above the feet.
-    pub fn resting_floor(
-        &self,
-        sector: usize,
-        pos: [f32; 3],
-        reach: f32,
-        radius: f32,
-        lift: bool,
-    ) -> Option<Rest> {
-        // The highest floor this call may return: a landing takes a contact at or below the body's
-        // centre, a placement reaches the plane query's own tolerance above it.
-        let ceiling = if lift { pos[2] + 0.05 } else { pos[2] - radius + 1e-3 };
-        let mut best: Option<Rest> = None;
-        for (floor, travelled, _owner, raw, surface) in
-            self.floor_candidates(sector, pos, reach + radius, radius)
-        {
-            // The fall may only reach a floor whose contact is inside this frame's travel, and the
-            // contact must not be above where the body already is.
-            if travelled > reach + 1e-3 || floor > ceiling {
-                continue;
-            }
-            if best.is_none_or(|near| floor > near.height) {
-                // `.jkl` plane normals point out of the room, while the walker wants the normal
-                // turned toward the body; a ramp's horizontal part is the downslope direction.
-                let normal = self
-                    .face_of
-                    .get(&surface)
-                    .and_then(|i| self.faces.get(*i))
-                    .map(|face| {
-                        if dot(sub(pos, face.point), face.normal) < 0.0 {
-                            [-face.normal[0], -face.normal[1], -face.normal[2]]
-                        } else {
-                            face.normal
-                        }
-                    })
-                    .unwrap_or(raw);
-                best = Some(Rest {
-                    height: floor,
-                    travelled,
-                    normal: Some(normal),
-                });
-            }
-        }
-        if best.is_none() {
-            // The shipped data does not always tile, so the plane is the port's own data-gap
-            // repair, not engine behaviour (`sithPhysics_FindFloor` sweeps surfaces only).
-            let plane = match self.floor_below(sector, pos) {
-                // A sector with no floor plane of its own is held by the floor planes of the
-                // sectors around it, which may not be walkable from it at all.
-                None => self
-                    .sectors_around(pos)
-                    .into_iter()
-                    .filter_map(|other| self.floor_below(other, pos))
-                    // A landing may not lift the body; a seating call raises the ceiling itself.
-                    .filter(|floor| *floor <= ceiling)
-                    .fold(None, |best: Option<f32>, floor| {
-                        Some(best.map_or(floor, |near| near.max(floor)))
-                    }),
-                // A sector whose plane is its only floor answers with it where the body is over
-                // the room and no face is inside the engine's floor reach: a walkway slab 0.42
-                // below a ramp still leaves the plane in charge (`walk15`'s 212-of-243 ungrounded
-                // frames), while level 2's ledge plane 3.0 under a 3.065 body is not support.
-                Some(plane) => {
-                    let contact = plane + radius;
-                    (self.room_contains(sector, pos, radius)
-                        && self.floor_under(sector, pos, 1.0, radius).is_none()
-                        && plane <= ceiling
-                        && pos[2] - contact <= reach + 1e-3)
-                        .then_some(plane)
-                }
-            };
-            if let Some(height) = plane {
-                best = Some(Rest {
-                    height,
-                    travelled: pos[2] - height - radius,
-                    normal: None,
-                });
-            }
-        }
-        // A placement seat (`lift`) resolves the **floor**, not the top of a table the body overlaps.
-        // Level 1's spawn overlaps the bar's `00table`: its top is 0.026 above the body's feet, so an
-        // unlimited-reach seat lifted the body onto it and the walker then wedged against the bar
-        // instead of walking retail's route along the floor. A landing still takes a prop top.
-        if !lift
-            && let Some(top) = self.prop_floor(pos, radius, reach)
-            && best.is_none_or(|near| top > near.height)
-        {
-            best = Some(Rest {
-                height: top,
-                travelled: pos[2] - top - radius,
-                normal: None,
-            });
-        }
-        best
-    }
-
-    /// The top of the highest solid thing the body is over, within `reach` below the feet.
-    ///
-    /// `sithCollision` treats a thing's own model as solid for every body, so a catwalk slab, a
-    /// crate or a lift platform is a floor. Tops are already feet heights, and a top above the
-    /// feet is something the body is beside, not standing on.
-    fn prop_floor(&self, pos: [f32; 3], radius: f32, reach: f32) -> Option<f32> {
-        let feet = pos[2] - radius;
-        let mut best: Option<f32> = None;
-        for thing in self.things().iter() {
-            if let Some(meshes) = &thing.mesh {
-                // An upward face the body is over is a floor at the face's height under the body.
-                for face in meshes.iter().flatten().filter(|f| f.normal[2] > 0.7) {
-                    if !over_face(face, pos, radius) {
-                        continue;
-                    }
-                    let top = face.point[2]
-                        - (face.normal[0] * (pos[0] - face.point[0]) + face.normal[1] * (pos[1] - face.point[1]))
-                            / face.normal[2];
-                    if top > feet + 0.02 || feet - top > reach + 1e-3 {
-                        continue;
-                    }
-                    if best.is_none_or(|near| top > near) {
-                        best = Some(top);
-                    }
-                }
-                continue;
-            }
-            let over = match thing.half {
-                Some(half) => {
-                    let local = thing.local([pos[0], pos[1]]);
-                    local[0].abs() <= half[0] + radius && local[1].abs() <= half[1] + radius
-                }
-                None => {
-                    let (dx, dy) = (pos[0] - thing.centre[0], pos[1] - thing.centre[1]);
-                    dx * dx + dy * dy <= (thing.radius + radius).powi(2)
-                }
-            };
-            if !over {
-                continue;
-            }
-            let top = thing.z_max;
-            if top > feet + 0.02 || feet - top > reach + 1e-3 {
-                continue;
-            }
-            if best.is_none_or(|near| top > near) {
-                best = Some(top);
-            }
-        }
-        best
     }
 }
 
@@ -3524,6 +3430,50 @@ mod tests {
         }
     }
 
+    /// `sithThing_UpdateMove` (`0x4cc4c0:40-46`): a physics body attached to a path thing that
+    /// moved nothing this frame runs `FindFloor`, which is what keeps a rider on a lift that has
+    /// stopped; the same zero move with no path parent does nothing at all.
+    #[test]
+    fn a_zero_move_on_a_path_parent_runs_find_floor() {
+        let mut rider = walker();
+        rider.attach_flags = 2;
+        assert_eq!(
+            Solids::update_move(&rider, [0.0; 3], [0.0; 3], 0.02, Some(2)),
+            UpdateMove::FindFloor
+        );
+        assert_eq!(Solids::update_move(&rider, [0.0; 3], [0.0; 3], 0.02, Some(1)), UpdateMove::Hold);
+        // `+0x34 & 8`: the attach carries the thing, and no move of its own runs (`:20`).
+        rider.attach_flags = 8 | 2;
+        assert_eq!(Solids::update_move(&rider, [0.0; 3], [0.0; 3], 0.02, Some(2)), UpdateMove::Hold);
+    }
+
+    /// `sithThing_UpdateMove` (`0x4cc4c0:33-39`): a body attached to a scrolling surface moves by
+    /// its own displacement plus `scroll * dt`; a path mover takes only the scroll, with flag 4.
+    #[test]
+    fn a_scrolling_surface_carries_its_body_by_scroll_times_dt() {
+        let mut body = walker();
+        body.attach_flags = 1;
+        let dt = 0.02;
+        let UpdateMove::Move { delta, flags } = Solids::update_move(&body, [0.1, 0.0, 0.0], [0.0, 2.0, 0.0], dt, None)
+        else {
+            panic!("a body on a scrolling surface did not move");
+        };
+        assert_eq!((delta, flags), ([0.1, 2.0 * dt, 0.0], 0));
+        body.move_type = 2;
+        let UpdateMove::Move { delta, flags } = Solids::update_move(&body, [0.1, 0.0, 0.0], [0.0, 2.0, 0.0], dt, None)
+        else {
+            panic!("a path mover on a scrolling surface did not move");
+        };
+        assert_eq!((delta, flags), ([0.0, 2.0 * dt, 0.0], 4));
+        // Off the surface the scroll does not apply.
+        body.move_type = 1;
+        body.attach_flags = 0;
+        assert_eq!(
+            Solids::update_move(&body, [0.0; 3], [0.0, 2.0, 0.0], dt, None),
+            UpdateMove::Hold
+        );
+    }
+
     /// One sphere thing mid-room, with the admission words the case under test needs.
     fn gate_thing(kind: u32, thing_flags: u32) -> ThingSolid {
         ThingSolid {
@@ -3774,51 +3724,6 @@ mod tests {
         );
     }
 
-    /// A placement seat resolves the floor, not a tabletop the body overlaps; a landing still stops
-    /// on a prop's model top. Level 1's spawn overlaps the cantina bar's `00table`: its top is above
-    /// the body's feet, so an unlimited-reach seat put the body **on the table** and the walker then
-    /// wedged against the bar instead of walking retail's route at floor height.
-    #[test]
-    fn a_placement_seat_ignores_a_prop_top_but_a_landing_takes_it() {
-        let mut room = seam_floor();
-        room.set_things(vec![ThingSolid {
-            index: 0,
-            centre: [0.5, 0.0, 0.0],
-            origin: [0.5, 0.0, 0.0],
-            radius: 0.3,
-            z_min: -0.1,
-            z_max: 0.07,
-            sector: 0,
-            half: None,
-            yaw: 0.0,
-            mesh: None,
-            thing_flags: 0,
-            collide: 1,
-            owner: None,
-            kind: 7,
-            item: false,
-        }]);
-        let radius = 0.065f32;
-        // The seat probes one radius above the body's centre (0.12), which puts the tabletop below
-        // the probe's feet, where `prop_floor` would otherwise accept it.
-        let seat = room
-            .resting_floor(0, [0.5, 0.0, 0.12 + radius], f32::INFINITY, radius, true)
-            .expect("the seat found no floor");
-        assert!(
-            (seat.height - 0.0).abs() < 1e-4,
-            "the seat lifted the body onto the table: height {}",
-            seat.height
-        );
-        // A falling body still lands on the table, not through it onto the room floor.
-        let land = room
-            .resting_floor(0, [0.5, 0.0, 0.2], 0.3, radius, false)
-            .expect("the landing found no floor");
-        assert!(
-            (land.height - 0.07).abs() < 1e-4,
-            "the landing ignored the table top: height {}",
-            land.height
-        );
-    }
     /// A non-mesh thing is the engine's `size=` sphere in 3D (`0x508540` gate, `0x5080d0:108-119`
     /// normal): a body above the centre stops farther out along the sphere's shoulder, and one
     /// outside the `size + radius` span passes clean over it. `sithCollision_MoveThing` (`0x4e7950`)
@@ -4440,145 +4345,6 @@ mod tests {
         assert!(room.floor_surface(0, [0.0, 0.0, -0.95]).is_none(), "beside the strip, over its plane");
     }
 
-    /// A `collide=3` mesh is collided as its faces: a door leaf laid flat (`18Ascend` things 323/324)
-    /// holds a body up where its upward face is, and nowhere else, whatever its upright bounds were.
-    #[test]
-    fn a_flat_mesh_leaf_is_a_floor_over_its_face_only() {
-        let leaf = Face {
-            normal: [0.0, 0.0, 1.0],
-            point: [0.0, 0.0, 1.0],
-            verts: vec![[-0.5, -0.5, 1.0], [0.5, -0.5, 1.0], [0.5, 0.5, 1.0], [-0.5, 0.5, 1.0]],
-            surface: usize::MAX,
-        };
-        let solids = Solids::default();
-        solids.set_things(vec![ThingSolid {
-            index: 0,
-            centre: [0.0, 0.0, 1.0],
-            origin: [0.0, 0.0, 1.0],
-            radius: 0.2,
-            z_min: 0.99,
-            z_max: 1.0,
-            sector: 0,
-            // The upright bounds a yaw-only box would use: thin and tall, nothing like the leaf.
-            half: Some([0.0125, 2.0]),
-            yaw: 0.0,
-            mesh: Some(vec![vec![leaf]].into()),
-            thing_flags: 0,
-            collide: 1,
-            owner: None,
-            kind: 7,
-            item: false,
-        }]);
-        let r = 0.065;
-        let on = solids.resting_floor(0, [0.3, 0.3, 1.0 + r], 0.1, r, false).expect("the leaf's top");
-        assert!((on.height - 1.0).abs() < 1e-5, "height {}", on.height);
-        assert!(solids.resting_floor(0, [1.0, 0.0, 1.0 + r], 0.1, r, false).is_none(), "beside the leaf");
-    }
-
-    /// The one floor rule answers the same resting height for the four shapes the motion callers
-    /// used to resolve with different queries: a sector whose floor is only its plane, a walkway
-    /// that is only a face, a ramp, and a solid thing's model top. The same body, at the same pose,
-    /// rests at the same height on every one of them.
-    #[test]
-    fn a_plane_only_sector_a_face_only_walkway_a_ramp_and_a_prop_rest_at_one_height() {
-        const R: f32 = 0.065;
-        let body = [0.0, 0.0, R];
-        let rest = |solids: &Solids| solids.resting_floor(0, body, 0.1, R, false);
-
-        // 1. Plane only: the cell's planes are its whole floor, with no polygon anywhere.
-        let plane_only = Solids {
-            sectors: vec![vec![
-                Plane { normal: [0.0, 0.0, -1.0], point: [0.0; 3], surface: usize::MAX },
-                Plane { normal: [0.0, 0.0, 1.0], point: [0.0, 0.0, 2.0], surface: usize::MAX },
-            ]],
-            spheres: vec![([0.0; 3], 4.0)],
-            portals: vec![Vec::new()],
-            ..Default::default()
-        };
-        let plane = rest(&plane_only).expect("a plane-only sector has a floor");
-        assert_eq!(plane.height, 0.0);
-        assert!(plane.normal.is_none(), "a plane carries no face normal");
-
-        // 2. Face only: `floor_below` is `None`, and the slab polygon is the whole floor.
-        let walkway = Face {
-            normal: [0.0, 0.0, 1.0],
-            point: [0.0; 3],
-            verts: vec![[-2.0, -2.0, 0.0], [2.0, -2.0, 0.0], [2.0, 2.0, 0.0], [-2.0, 2.0, 0.0]],
-            surface: 1,
-        };
-        let face_only = Solids {
-            sectors: vec![vec![Plane { normal: [0.0, 0.0, 1.0], point: [0.0, 0.0, 2.0], surface: 2 }]],
-            spheres: vec![([0.0; 3], 4.0)],
-            portals: vec![Vec::new()],
-            faces: vec![walkway],
-            face_of: [(1usize, 0usize)].into_iter().collect(),
-            surface_owner: vec![0, 0, 0],
-            ..Default::default()
-        };
-        assert!(face_only.floor_below(0, body).is_none(), "the fixture must carry no floor plane");
-        let face = rest(&face_only).expect("a face-only walkway has a floor");
-        assert_eq!(face.height, 0.0);
-
-        // 3. Ramp: a 45-degree face, wound with the file's out-of-room normal. The body already
-        // touches it at this pose, so the resting height matches; the normal is what tells the walker
-        // which way the slope falls.
-        let up = [std::f32::consts::FRAC_1_SQRT_2, 0.0, std::f32::consts::FRAC_1_SQRT_2];
-        let slant = Face {
-            normal: [-up[0], 0.0, -up[2]],
-            point: [0.0; 3],
-            verts: vec![
-                [-2.0, -2.0, 2.0],
-                [2.0, -2.0, -2.0],
-                [2.0, 2.0, -2.0],
-                [-2.0, 2.0, 2.0],
-            ],
-            surface: 1,
-        };
-        let ramp = Solids {
-            sectors: vec![vec![Plane { normal: [0.0, 0.0, 1.0], point: [0.0, 0.0, 2.0], surface: 2 }]],
-            spheres: vec![([0.0; 3], 4.0)],
-            portals: vec![Vec::new()],
-            faces: vec![slant],
-            face_of: [(1usize, 0usize)].into_iter().collect(),
-            surface_owner: vec![0, 0, 0],
-            ..Default::default()
-        };
-        let ramp = rest(&ramp).expect("a ramp is a floor");
-        assert_eq!(ramp.height, 0.0);
-        let normal = ramp.normal.expect("a ramp keeps its slope");
-        assert!((normal[2] - up[2]).abs() < 1e-4, "the ramp normal must point up: {normal:?}");
-
-        // 4. Solid prop: no level geometry at all, only the thing's model top.
-        let prop = Solids::default();
-        prop.set_things(vec![ThingSolid {
-            index: 0,
-            centre: [0.0; 3],
-            origin: [0.0; 3],
-            radius: 0.5,
-            z_min: -1.0,
-            z_max: 0.0,
-            sector: 0,
-            half: None,
-            yaw: 0.0,
-            mesh: None,
-            thing_flags: 0,
-            collide: 1,
-            owner: None,
-            kind: 7,
-            item: false,
-        }]);
-        let top = rest(&prop).expect("a solid thing's top is a floor");
-        assert_eq!(top.height, 0.0);
-        assert!(top.normal.is_none(), "a thing's top carries no level normal");
-
-        // One primitive, four surfaces, one resting height.
-        assert_eq!(
-            [plane.height, face.height, ramp.height, top.height],
-            [0.0; 4],
-            "the motion callers' surfaces must come to rest at the same height"
-        );
-    }
-
     #[test]
     fn walks_portals_only_where_the_camera_can_see() {
         let level = corridor();
@@ -4744,42 +4510,6 @@ mod tests {
         // Headroom is the difference, which is the number the camera uses.
         let headroom = ceiling - (-0.5);
         assert!((headroom - 1.5).abs() < 1e-4, "headroom = {headroom}");
-    }
-
-    /// A neighbour sector joins the collision search only when the sweep reaches the opening into it:
-    /// a body resting on a floor opening and walking level stays out of the room below (`18Ascend`'s
-    /// spawn), while a body dropping through it, or walking into a wall opening, is searched there.
-    #[test]
-    fn a_neighbour_is_searched_only_when_the_sweep_reaches_its_opening() {
-        let mut room = seam_floor();
-        let opening = |normal: [f32; 3], adjoin: usize| Portal {
-            adjoin,
-            link: 0,
-            verts: Vec::new(),
-            normal,
-            point: [0.0; 3],
-        };
-        // Sector 0's floor opens onto sector 1 below; its wall at x = 0 opens onto sector 2.
-        room.portals = vec![vec![opening([0.0, 0.0, 1.0], 1), opening([1.0, 0.0, 0.0], 2)]];
-        let r = 0.065;
-        let level = [1.0, 0.0, 0.0];
-        assert!(room.in_search(0, 0, [5.0, 0.0, 5.0], level, 0.1, r), "a body's own sector");
-        assert!(
-            !room.in_search(0, 1, [5.0, 0.0, r], level, 0.1, r),
-            "a body standing on the floor opening searched the room below it"
-        );
-        assert!(
-            room.in_search(0, 1, [5.0, 0.0, r], [0.0, 0.0, -1.0], 0.1, r),
-            "a body dropping through the opening did not search the room below"
-        );
-        assert!(
-            room.in_search(0, 2, [0.1, 0.0, 1.0], [-1.0, 0.0, 0.0], 0.1, r),
-            "a body walking into the wall opening did not search the next room"
-        );
-        assert!(
-            !room.in_search(0, 2, [3.0, 0.0, 1.0], [-1.0, 0.0, 0.0], 0.1, r),
-            "a body far from the wall opening searched the next room"
-        );
     }
 
     /// A chain hop is taken only when the sweep reaches that **portal**. Two rooms are always
