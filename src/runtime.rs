@@ -1099,6 +1099,21 @@ pub struct ThingMotion {
     pub arrived: Vec<usize>,
 }
 
+/// One frame of `sithThing_Update`'s loop (`0x4cc1e0`): the per-frame tables its movers read and
+/// what they changed.
+pub struct ThingPass {
+    dt: f32,
+    player_at: Option<usize>,
+    body_radius: Vec<f32>,
+    thrust: Vec<[f32; 3]>,
+    /// The runtime's own collider when the caller passed none.
+    stored: Option<std::sync::Arc<crate::collide::Solids>>,
+    moved: Vec<usize>,
+    turned: Vec<usize>,
+    blocked: Vec<usize>,
+    arrived: Vec<usize>,
+}
+
 /// The player's own body: where it is, how it moves, and where it looks. The runtime writes it
 /// through `step_player`, `teleport_player` and `respawn_player`; everything else reads it.
 #[derive(Debug, Clone)]
@@ -1960,6 +1975,8 @@ pub struct Runtime {
     pub default_weapon: String,
     /// Powerups taken and counting down to respawn: `(thing index, seconds left)`.
     pub respawning: Vec<(usize, f32)>,
+    /// Powerups the events slot brought back this frame, for the thing loop's `moved`.
+    respawned: Vec<usize>,
     /// What the scripts actually changed, for the run report.
     pub adjoins_changes: usize,
     pub things_moved: usize,
@@ -2882,6 +2899,7 @@ impl Runtime {
                 })
                 .unwrap_or_else(|| "+bryarbolt".to_string()),
             respawning: Vec::new(),
+            respawned: Vec::new(),
             adjoins_changes: 0,
             things_moved: 0,
         }
@@ -3190,7 +3208,10 @@ impl Runtime {
         }
     }
 
-    /// Advance every moving thing, returning the pose changes and queued events.
+    /// `sithUpdate` (`0x4c4c00`) for a runtime with no player body: the time advance, the
+    /// events, the surface tick and `sithThing_Update`, in the engine's order. The app runs the
+    /// same slots through [`Self::sith_update_head`], the AI, [`Self::sith_surface_tick`] and
+    /// [`Self::sith_thing_update`]; this form is the headless one the checks and tests drive.
     ///
     /// `geometry` is the caller's collider view: the step settles the actors `ai_tick` walked
     /// against it, and their corrected poses ride out on `ThingMotion::moved`. The step keeps no
@@ -3206,57 +3227,22 @@ impl Runtime {
         geometry: Option<&crate::collide::Solids>,
         dt: f32,
     ) -> ThingMotion {
-        let mut moved = Vec::new();
-        let mut turned = Vec::new();
-        self.time += dt;
-        // `PlayKey` on a **thing** (a script camera's `MAcamera.key`) moves its pose: the key's single
-        // node carries the dolly, relative to the pose the key started from. Level 14's opening key walks
-        // its `droidcam` from (39.47, 11.38, 35.15) to about (39.65, -6.6, 28.4) — onto Kyle — where the
-        // retail shot looks down at him; without it the view stays at the placed pose. Actors' `PlayKey`
-        // names a puppet track, whose nodes pose the *model*, so only a key whose single node is a camera
-        // box is a thing track. `ponytail:` a mesh-name test, not the engine's root-track rule in
-        // `sithPuppet_UpdateThingMove`; the upgrade path is to read that rule and drop the name test.
-        if !self.play_key.is_empty() {
-            let entries: Vec<(usize, String, i32)> = self
-                .play_key
-                .iter()
-                .map(|(thing, (name, _flags, start))| (*thing, name.clone(), *start))
-                .collect();
-            for (thing, name, start) in entries {
-                let Some(key) = self.keys.get(&name) else { continue };
-                if key.nodes.len() != 1 {
-                    continue;
-                }
-                let node = &key.nodes[0];
-                if !node.mesh.to_ascii_lowercase().contains("camera") {
-                    continue;
-                }
-                let Some(base) = self.key_base.get(&thing).copied() else { continue };
-                let Some(pose) = node.at(start as f32 + self.time * key.fps) else { continue };
-                if std::env::var_os("BK_KEY_TRACE").is_some() {
-                    println!(
-                        "key: thing {thing} {name} start {start} time {:.3} fps {} frame {:.2}",
-                        self.time,
-                        key.fps,
-                        start as f32 + self.time * key.fps
-                    );
-                }
-                let Some(t) = self.things.get_mut(thing) else { continue };
-                let (sin, cos) = base.1.to_radians().sin_cos();
-                t.pos = [
-                    base.0[0] + pose.pos[0] * cos - pose.pos[1] * sin,
-                    base.0[1] + pose.pos[0] * sin + pose.pos[1] * cos,
-                    base.0[2] + pose.pos[2],
-                ];
-                t.yaw = base.1 + pose.rot[1];
-                t.pitch = base.2 + pose.rot[0];
-                t.roll = base.3 + pose.rot[2];
-                if std::env::var_os("BK_KEY_TRACE").is_some() {
-                    println!("key: thing {thing} pos now {:?}", t.pos);
-                }
-                moved.push(thing);
-            }
+        self.sith_update_head(dt);
+        self.sith_surface_tick(dt);
+        let mut pass = self.thing_update_begin(geometry, dt);
+        for index in 0..self.things.len() {
+            self.sith_thing_update_one(&mut pass, geometry, index);
         }
+        self.thing_update_end(pass, geometry)
+    }
+
+    /// `sithUpdate`'s (`0x4c4c00:24-31`) slots before the AI: the time advance, the sound mixer
+    /// and the events. The port's event queue is the bin cadence and the item respawn countdown;
+    /// the camera's shake decay (`sithCamera_Update`, which the engine runs from the render path)
+    /// rides here too.
+    pub fn sith_update_head(&mut self, dt: f32) {
+        self.time += dt;
+        self.advance_sound_fades(dt);
         // `sithInventory_SendFire`: an active bin with a delay sends its own cog a `fire` every delay,
         // which is what makes a held force power keep doing its thing. Re-armed while the bin stays in
         // `bin_active`, so `DeactivateBin` ends the loop.
@@ -3277,96 +3263,6 @@ impl Runtime {
             }
             self.bin_due = still;
         }
-        self.decay_damage(dt);
-        self.decay_dynamic_tint(dt);
-        self.advance_surface_cels();
-        self.advance_material_cels();
-        self.bump_scroll_epoch();
-        self.advance_lights(dt);
-        self.decay_shake(dt);
-        self.advance_thing_lights(dt);
-        self.advance_sound_fades(dt);
-        // `timer=`/`SetLifeLeft` expiry: `sithThing_Update` counts `msecLifeLeft` down and calls
-        // `sithThing_DestroyDyingThing` when it reaches zero. Without this an impact spark lives
-        // forever, and a corpse never goes away.
-        let expired: Vec<usize> = self
-            .life_left
-            .iter_mut()
-            .filter_map(|(index, left)| {
-                *left -= dt;
-                (*left <= 0.0).then_some(*index)
-            })
-            .collect();
-        for index in expired {
-            self.life_left.remove(&index);
-            self.life_total.remove(&index);
-            // A projectile whose `timer=` ran out never landed: it is a miss in the chronology.
-            self.note_shot_lost(index);
-            if let Some(thing) = self.things.get_mut(index) {
-                thing.destroyed = true;
-            }
-        }
-        // `SetThingTimer`'s deadline passed: `sithCog_UpdateThingTimer` sends `timer` (4) to the
-        // thing's own scripts, which is how `03_thinglight.cog` rotates its colours.
-        let due: Vec<usize> = self
-            .thing_timer
-            .iter()
-            .filter(|(_, at)| **at <= self.time)
-            .map(|(index, _)| *index)
-            .collect();
-        for index in due {
-            self.thing_timer.remove(&index);
-            for instance in self.thing_instances(index) {
-                self.pending_messages.push((instance, "timer", [0.0; 2], None, None));
-            }
-        }
-        // Force mana regenerates — but only for a Jedi that has a pool. `kyle.cog`'s class script
-        // carries the rule (`Set Mana to full`: `SetInv(player, 14, GetInv(player, 20) * 50)`), so a
-        // rank-0 player has no mana to regenerate; retail's level-2 save carries no bin 14 for exactly
-        // that reason, while the port used to credit a pool out of nothing. A pool a script or a save
-        // already gave the player still regenerates whatever the rank.
-        let rank = self.inv.get(&crate::force::RANK).copied().unwrap_or(0.0);
-        let has_pool = self.inv.get(&14).copied().unwrap_or(0.0) > 0.0;
-        if rank > 0.0 || has_pool {
-            // `force_heal.cog` spends `20 * rank` of bin 14; the *rate* is calibrated (§16.5) because
-            // the engine's own tick lives in `jkPlayer.c`, which this source tree does not carry.
-            if let Some(mana) = self.inv.get_mut(&14) {
-                *mana = (*mana + self.mana_regen * dt).min(self.mana_max);
-            }
-        }
-        // `ApplyForce(thing, v)`: the impulse the force scripts apply. `force_pull.cog` gives a pulled
-        // item `30` units/s toward the player with gravity cleared (`ClearPhysicsFlags(thing, 0x1)`);
-        // the impulse is folded into the thing's velocity once, which is what makes it fly in.
-        //
-        // This replaced an invented continuous drag: `jkSetTarget` is only the *highlight* the reticle
-        // shows, and the real movement is this one impulse at the moment the power is released
-        // (`force_pull.cog`'s `deactivated`, §16.5).
-        if !self.force.is_empty() {
-            for (index, impulse) in std::mem::take(&mut self.force) {
-                if let Some(thing) = self.things.get_mut(index) {
-                    for (slot, add) in thing.vel.iter_mut().zip(impulse) {
-                        *slot += add;
-                    }
-                    moved.push(index);
-                }
-            }
-        }
-        // `SetThingPulse`: a thing's own timer messages its script slots with `pulse` every interval.
-        let pulsing: Vec<usize> = self
-            .things
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| t.pulse > 0.0 && t.pulse_at <= self.time)
-            .map(|(i, _)| i)
-            .collect();
-        for index in pulsing {
-            if let Some(thing) = self.things.get_mut(index) {
-                thing.pulse_at = self.time + thing.pulse;
-            }
-            for instance in self.thing_instances(index) {
-                self.pending_messages.push((instance, "pulse", [0.0; 2], None, None));
-            }
-        }
         // Powerups with `respawn=` come back. The countdown runs in the same step as
         // everything else; a thing restored this way is alive and full-health again.
         if !self.respawning.is_empty() {
@@ -3386,28 +3282,78 @@ impl Runtime {
                     let template = self.templates.get(index).cloned().unwrap_or_default();
                     thing.health = self.template_health.get(&template).copied().unwrap_or(1.0);
                 }
-                moved.push(index);
+                self.respawned.push(index);
             }
         }
-        let mut blocked: Vec<usize> = Vec::new();
+        self.decay_shake(dt);
+    }
+
+    /// `sithSurface_Tick`'s slot (`0x4c4c00:34`): surface and material cels, scrolling, sector and
+    /// thing light ramps. shortcut: the port's own advances stand in for `sithSurface_Tick`'s
+    /// internals; transliterate that function when a surface mechanic disagrees.
+    pub fn sith_surface_tick(&mut self, dt: f32) {
+        self.decay_dynamic_tint_unowned(dt);
+        self.advance_surface_cels();
+        self.advance_material_cels();
+        self.bump_scroll_epoch();
+        self.advance_lights(dt);
+        self.advance_thing_lights(dt);
+    }
+
+    /// `sithThing_Update` (`0x4cc1e0`) with the player body: every thing in index order, and at
+    /// the local player's own index its physics and move through `player` (the app's
+    /// [`Self::step_player`] call). The runtime is released around `player`, which runs scripts
+    /// synchronously at its contacts.
+    pub fn sith_thing_update(
+        world: &World,
+        geometry: Option<&crate::collide::Solids>,
+        dt: f32,
+        mut player: impl FnMut(),
+    ) -> ThingMotion {
+        let (mut pass, count) = {
+            let mut rt = world.borrow_mut();
+            let pass = rt.thing_update_begin(geometry, dt);
+            let count = rt.things.len();
+            (pass, count)
+        };
+        for index in 0..count {
+            world.borrow_mut().sith_thing_update_one(&mut pass, geometry, index);
+            if Some(index) == pass.player_at {
+                // `sithPhysics_UpdateThing` and `sithThing_UpdateMove` for the player's body.
+                player();
+            }
+        }
+        world.borrow_mut().thing_update_end(pass, geometry)
+    }
+
+    /// The per-frame tables `sithThing_Update`'s loop reads, and the one-time load attach.
+    fn thing_update_begin(&mut self, geometry: Option<&crate::collide::Solids>, dt: f32) -> ThingPass {
+        let mut moved = std::mem::take(&mut self.respawned);
+        // `ApplyForce(thing, v)`: the impulse the force scripts apply. `force_pull.cog` gives a pulled
+        // item `30` units/s toward the player with gravity cleared (`ClearPhysicsFlags(thing, 0x1)`);
+        // the impulse is folded into the thing's velocity once, which is what makes it fly in.
+        //
+        // This replaced an invented continuous drag: `jkSetTarget` is only the *highlight* the reticle
+        // shows, and the real movement is this one impulse at the moment the power is released
+        // (`force_pull.cog`'s `deactivated`, §16.5).
+        if !self.force.is_empty() {
+            for (index, impulse) in std::mem::take(&mut self.force) {
+                if let Some(thing) = self.things.get_mut(index) {
+                    for (slot, add) in thing.vel.iter_mut().zip(impulse) {
+                        *slot += add;
+                    }
+                    moved.push(index);
+                }
+            }
+        }
         // `sithPhysics.c`: a body in a `SITH_SECTOR_USETHRUST` sector gets `thrust * dt` added to its
         // velocity each step, exactly like gravity. Level 21's core tube lifts what stands in it.
         let thrust: Vec<[f32; 3]> = self.sectors.iter().map(|s| s.thrust).collect();
-        // Non-player gravity bodies (the `_debris` goods, the actors — both ship physflags with
-        // bit 0 and a mass) come to rest through the engine's own chain, one `step_body` per
-        // tick: `sithPhysics_UpdateThing`'s routing (`0x4f5900`) — the attached hold
-        // (`0x4f7430`) or gravity — then `sithThing_UpdateMove` (`0x4cc4c0`) ->
-        // `sithCollision_MoveThing` (`0x4e7950`) with its `FindFloor` tail (`0x4f5550`). The
-        // plane-shortcut gravity stop and the `resting_floor` grounding probe this replaces
-        // were deviation-ledger rows (round 246 / the movement-path trio).
-        // The player is **not** a generic mover: `walk_player` integrates the body and consumes a
+        // The player is **not** a generic mover: `step_player` integrates the body and consumes a
         // scripted velocity (`force_jump.cog`'s `SetThingVel`) into `player.vy`. Letting both loops run
         // meant the generic one moved the *thing*, hit the level, zeroed the velocity and rewound the
         // position, so the jump's impulse was spent before the walker ever saw it.
-        let player_at = self
-            .templates
-            .iter()
-            .position(|t| t.eq_ignore_ascii_case("walkplayer"));
+        let player_at = self.local_player();
         // Per-body radius, sampled **before** the mutable iteration: the seat borrows the
         // collider, which the loop below forbids.
         let body_radius: Vec<f32> = (0..self.things.len())
@@ -3424,12 +3370,12 @@ impl Runtime {
                     .unwrap_or(0.065)
             })
             .collect();
+        let stored = if geometry.is_none() { self.solids.clone() } else { None };
         // `sithThing_Initialize` attaches a placed physics body to the floor it stands over at
         // load (`FindFloor(thing, 1)`, the forced reach), so an actor keeps the level's authored
         // height instead of sagging to its sphere contact first. The pass runs once, on the first
         // step that has a collider.
-        let stored_geometry = if geometry.is_none() { self.solids.clone() } else { None };
-        let seat_geometry = geometry.or(stored_geometry.as_deref());
+        let seat_geometry = geometry.or(stored.as_deref());
         let mut seated_load = false;
         if !self.seated_load && let Some(solids) = seat_geometry {
             seated_load = true;
@@ -3475,192 +3421,325 @@ impl Runtime {
         // Latch, never reset: the load-time attach is once (`sithThing_Initialize`). Assigning
         // the per-tick flag here cleared it every other tick and re-ran the creation attach.
         self.seated_load |= seated_load;
-        // A projectile that dies on geometry is a miss in the encounter chronology.
-        let mut lost_shots: Vec<usize> = Vec::new();
-        // Resolve in thing order so a later contact cannot overwrite a live target impulse.
-        for i in 0..self.things.len() {
-            let seat = if Some(i) == player_at { None } else {
-                seat_geometry.and_then(|solids| self.move_gravity_body(solids, i, dt, body_radius[i], &thrust))
-            };
-            let t = &mut self.things[i];
-            if Some(i) == player_at {
-                // Path moves still run — a script can walk the player along frames — but the body's
-                // velocity is the walker's to integrate, and `t.vel` is left for it to consume.
-                let rotating = t.rot_vel != [0.0; 3];
-                let _ = t.step(dt);
-                if rotating {
-                    turned.push(i);
-                }
-                continue;
-            }
-            // MoveThing already ran the body's sweep and FindFloor tail.
-            if let Some((state, flat, crossed, anchor)) = seat {
-                let attach_flipped = t.floor_attach.is_some() != state.attach.is_some();
-                let fell = (state.pos[2] - t.pos[2]).abs() > 1e-9;
-                t.pos = state.pos;
-                t.sector = state.sector as i32;
-                t.vel = state.vel;
-                t.floor_attach = state.attach;
-                t.attach_flags = state.attach_flags;
-                t.phys_flags = state.phys_flags;
-                if let Some(anchor) = anchor { t.attach_offset = anchor; }
-                let rotating = t.rot_vel != [0.0; 3];
-                let path_moved = t.step(dt);
-                if rotating {
-                    turned.push(i);
-                }
-                // `moved` must also see a pure vertical fall inside one sector: `flat` is the
-                // horizontal travel and the path arm only covers frame paths, so a dropping
-                // body would keep a stale drawn transform until it landed.
-                if flat > 0.0 || fell || crossed || attach_flipped || path_moved {
-                    moved.push(i);
-                }
-                continue;
-            }
-            if let Some(drive) = usize::try_from(t.sector).ok().and_then(|s| thrust.get(s)).copied()
-                && drive != [0.0; 3]
-                // `sithPhysics_UpdateThingPhysics`'s thrust arm (`0x4f6270`) skips a body whose
-                // physflags carry `0x400000` — the flag `_powerup` ships (`physflags=0x400000`), which
-                // is why m5's four weapon pickups stay put in the sectors a script gives an updraft
-                // instead of climbing to z 89.3. The player is excluded below: `walk_player` owns it.
-                && t.phys_flags & 0x400000 == 0
-                && !t.destroyed
-            {
-                for k in 0..3 {
-                    t.vel[k] += drive[k] * dt;
+        ThingPass {
+            dt,
+            player_at,
+            body_radius,
+            thrust,
+            stored,
+            moved,
+            turned: Vec::new(),
+            blocked: Vec::new(),
+            arrived: Vec::new(),
+        }
+    }
+
+    /// One thing's turn in `sithThing_Update` (`0x4cc1e0:24-93`), in the engine's slot order.
+    fn sith_thing_update_one(
+        &mut self,
+        pass: &mut ThingPass,
+        geometry: Option<&crate::collide::Solids>,
+        i: usize,
+    ) {
+        let dt = pass.dt;
+        // 1. The lifetime countdown (`0x4cc1e0:24-61`): `timer=`/`SetLifeLeft` reaching zero
+        // destroys the thing. Without this an impact spark lives forever, and a corpse never goes
+        // away.
+        if let Some(left) = self.life_left.get_mut(&i) {
+            *left -= dt;
+            if *left <= 0.0 {
+                self.life_left.remove(&i);
+                self.life_total.remove(&i);
+                // A projectile whose `timer=` ran out never landed: it is a miss in the chronology.
+                self.note_shot_lost(i);
+                if let Some(thing) = self.things.get_mut(i) {
+                    thing.destroyed = true;
                 }
             }
-            // A projectile flies straight; a door or lift follows its frame path. A thing
-            // is one or the other, so both are checked and a projectile never has frames.
-            let previous = t.pos;
-            let flying = t.vel != [0.0; 3];
-            if flying {
-                for k in 0..3 {
-                    t.pos[k] += t.vel[k] * dt;
-                }
+        }
+        // 2. `sithCog_UpdateThingTimer` (thingflags `0x60000`, `0x4cc1e0:64-66`): a passed
+        // `SetThingTimer` deadline sends `timer` (4) to the thing's own scripts, which is how
+        // `03_thinglight.cog` rotates its colours; `SetThingPulse` sends `pulse` every interval.
+        if self.thing_timer.get(&i).is_some_and(|at| *at <= self.time) {
+            self.thing_timer.remove(&i);
+            for instance in self.thing_instances(i) {
+                self.pending_messages.push((instance, "timer", [0.0; 2], None, None));
             }
-            let path_moved = t.step(dt);
-            if t.rot_vel != [0.0; 3] {
+        }
+        if let Some(thing) = self.things.get_mut(i)
+            && thing.pulse > 0.0
+            && thing.pulse_at <= self.time
+        {
+            thing.pulse_at = self.time + thing.pulse;
+            for instance in self.thing_instances(i) {
+                self.pending_messages.push((instance, "pulse", [0.0; 2], None, None));
+            }
+        }
+        // 3. The control arms (`0x4cc1e0:67-76`). shortcut: `sithAI_Tick` still runs for every
+        // actor in `ai_tick`, in `sithAI_Process`'s slot, until the AI moves through physics
+        // (#110); `sithExplosion_Update` and `sithParticle_Update` have no port yet.
+        // 4. The type arms (`0x4cc1e0:77-86`).
+        match self.types.get(i).copied() {
+            Some(3) => self.sith_weapon_update(i, dt),
+            _ if Some(i) == pass.player_at => self.sith_player_update(dt),
+            // shortcut: `sithActor_Update` (drowning) has no port yet (#111).
+            _ => {}
+        }
+        // 5. `sithPhysics_UpdateThing` (move=physics) or the frame path (move=path), then 6.
+        // `sithThing_UpdateMove` (`0x4cc4c0`) inside the physics body's move.
+        self.sith_thing_motion(pass, geometry, i);
+        // 7. The puppet slot (`sithPuppet_UpdatePuppet`, `0x4cc1e0:93`): the thing-track `PlayKey`.
+        // shortcut: the actors' animation input is still `animate_actors`' in the app.
+        self.sith_puppet_thing_key(pass, i);
+    }
+
+    /// `sithWeapon_Update`'s decay, one step's worth: damage falls by `rate * dt`, floored
+    /// at `mindamage`. A weapon whose typeflags lack `SITH_WF_DAMAGE_DECAY` (0x4000) keeps
+    /// its damage. shortcut: the weapon's own movement arms are not ported.
+    fn sith_weapon_update(&mut self, index: usize, dt: f32) {
+        let Some(thing) = self.things.get_mut(index) else { return };
+        if thing.decay > 0.0 && thing.damage > thing.min_damage {
+            thing.damage = (thing.damage - thing.decay * dt).max(thing.min_damage);
+        }
+    }
+
+    /// `sithPlayer_Update`'s slot for the local player: the dynamic tint decay and the force mana
+    /// regeneration.
+    fn sith_player_update(&mut self, dt: f32) {
+        self.decay_dynamic_tint(dt);
+        // Force mana regenerates — but only for a Jedi that has a pool. `kyle.cog`'s class script
+        // carries the rule (`Set Mana to full`: `SetInv(player, 14, GetInv(player, 20) * 50)`), so a
+        // rank-0 player has no mana to regenerate; retail's level-2 save carries no bin 14 for exactly
+        // that reason, while the port used to credit a pool out of nothing. A pool a script or a save
+        // already gave the player still regenerates whatever the rank.
+        let rank = self.inv.get(&crate::force::RANK).copied().unwrap_or(0.0);
+        let has_pool = self.inv.get(&14).copied().unwrap_or(0.0) > 0.0;
+        if rank > 0.0 || has_pool {
+            // `force_heal.cog` spends `20 * rank` of bin 14; the *rate* is calibrated (§16.5) because
+            // the engine's own tick lives in `jkPlayer.c`, which this source tree does not carry.
+            if let Some(mana) = self.inv.get_mut(&14) {
+                *mana = (*mana + self.mana_regen * dt).min(self.mana_max);
+            }
+        }
+    }
+
+    /// The player's tint and mana when the runtime has no player thing to update them: a test
+    /// runtime or a level with no `walkplayer`. The engine has no such case; the port's state is
+    /// global, so it still advances.
+    fn decay_dynamic_tint_unowned(&mut self, dt: f32) {
+        if self.local_player().is_none() {
+            self.sith_player_update(dt);
+        }
+    }
+
+    /// `sithPhysics_UpdateThing` or the frame path, and the move.
+    fn sith_thing_motion(
+        &mut self,
+        pass: &mut ThingPass,
+        geometry: Option<&crate::collide::Solids>,
+        i: usize,
+    ) {
+        let dt = pass.dt;
+        let seat_geometry = geometry.or(pass.stored.as_deref());
+        let seat = if Some(i) == pass.player_at { None } else {
+            seat_geometry.and_then(|solids| self.move_gravity_body(solids, i, dt, pass.body_radius[i], &pass.thrust))
+        };
+        let moved = &mut pass.moved;
+        let turned = &mut pass.turned;
+        let t = &mut self.things[i];
+        if Some(i) == pass.player_at {
+            // Path moves still run — a script can walk the player along frames — but the body's
+            // velocity is the walker's to integrate, and `t.vel` is left for it to consume.
+            let rotating = t.rot_vel != [0.0; 3];
+            let _ = t.step(dt);
+            if rotating {
                 turned.push(i);
             }
-            // A thing that runs into the level stops and sends `blocked`; nothing here moves a
-            // projectile out of the world (the renderer's own bounds test removes those).
-            if let Some(solids) = &self.solids
-                && (flying || path_moved)
-                && !t.destroyed
-            {
-                // ponytail: position/segment tests against the sector's own planes and faces, not
-                // `collide::sweep`, so a thing crosses a shut adjoin (a closed force field) that
-                // stops the player. The engine's `SearchForSurfaceCollisions` treats it as solid for
-                // every body; putting projectiles and actors on the swept path is the upgrade.
-                // The sector **tracks the move**: a bolt crosses several rooms per frame and the
-                // engine enters each one (`sithThing_EnterSector`) as the move lands, while a stale
-                // sector had the resolver pushing against a room the thing was not in (level 1's
-                // door fight: a bolt "in" sector 210 pushed out by a sector-339 wall 0.37 short of
-                // the body, while the LOS test called the same line clear).
-                let probe = if self.types.get(i).copied() == Some(3) { 0.02 } else { 0.4 };
-                let sector = solids
-                    .sector_at(t.pos, probe)
-                    .unwrap_or(t.sector.max(0) as usize);
-                if sector as i32 != t.sector {
-                    t.sector = sector as i32;
+            self.sith_track_thing_pivot(pass, i);
+            return;
+        }
+        // MoveThing already ran the body's sweep and FindFloor tail.
+        if let Some((state, flat, crossed, anchor)) = seat {
+            let attach_flipped = t.floor_attach.is_some() != state.attach.is_some();
+            let fell = (state.pos[2] - t.pos[2]).abs() > 1e-9;
+            t.pos = state.pos;
+            t.sector = state.sector as i32;
+            t.vel = state.vel;
+            t.floor_attach = state.attach;
+            t.attach_flags = state.attach_flags;
+            t.phys_flags = state.phys_flags;
+            if let Some(anchor) = anchor { t.attach_offset = anchor; }
+            let rotating = t.rot_vel != [0.0; 3];
+            let path_moved = t.step(dt);
+            if rotating {
+                turned.push(i);
+            }
+            // `moved` must also see a pure vertical fall inside one sector: `flat` is the
+            // horizontal travel and the path arm only covers frame paths, so a dropping
+            // body would keep a stale drawn transform until it landed.
+            if flat > 0.0 || fell || crossed || attach_flipped || path_moved {
+                moved.push(i);
+            }
+            self.sith_track_thing_pivot(pass, i);
+            return;
+        }
+        let thrust = &pass.thrust;
+        if let Some(drive) = usize::try_from(t.sector).ok().and_then(|s| thrust.get(s)).copied()
+            && drive != [0.0; 3]
+            // `sithPhysics_UpdateThingPhysics`'s thrust arm (`0x4f6270`) skips a body whose
+            // physflags carry `0x400000` — the flag `_powerup` ships (`physflags=0x400000`), which
+            // is why m5's four weapon pickups stay put in the sectors a script gives an updraft
+            // instead of climbing to z 89.3. The player is excluded above: `step_player` owns it.
+            && t.phys_flags & 0x400000 == 0
+            && !t.destroyed
+        {
+            for k in 0..3 {
+                t.vel[k] += drive[k] * dt;
+            }
+        }
+        // A projectile flies straight; a door or lift follows its frame path. A thing
+        // is one or the other, so both are checked and a projectile never has frames.
+        let previous = t.pos;
+        let flying = t.vel != [0.0; 3];
+        if flying {
+            for k in 0..3 {
+                t.pos[k] += t.vel[k] * dt;
+            }
+        }
+        let path_moved = t.step(dt);
+        if t.rot_vel != [0.0; 3] {
+            turned.push(i);
+        }
+        // A thing that runs into the level stops and sends `blocked`; nothing here moves a
+        // projectile out of the world (the renderer's own bounds test removes those).
+        if let Some(solids) = &self.solids
+            && (flying || path_moved)
+            && !t.destroyed
+        {
+            // ponytail: position/segment tests against the sector's own planes and faces, not
+            // `collide::sweep`, so a thing crosses a shut adjoin (a closed force field) that
+            // stops the player. The engine's `SearchForSurfaceCollisions` treats it as solid for
+            // every body; putting projectiles and actors on the swept path is the upgrade.
+            // The sector **tracks the move**: a bolt crosses several rooms per frame and the
+            // engine enters each one (`sithThing_EnterSector`) as the move lands, while a stale
+            // sector had the resolver pushing against a room the thing was not in (level 1's
+            // door fight: a bolt "in" sector 210 pushed out by a sector-339 wall 0.37 short of
+            // the body, while the LOS test called the same line clear).
+            let probe = if self.types.get(i).copied() == Some(3) { 0.02 } else { 0.4 };
+            let sector = solids
+                .sector_at(t.pos, probe)
+                .unwrap_or(t.sector.max(0) as usize);
+            if sector as i32 != t.sector {
+                t.sector = sector as i32;
+            }
+            // A projectile is not a 0.4-radius body: the engine collides it by its template's
+            // own `movesize` (`+bryarbolt` is 0.001), and the fixed 0.4 made every bolt stop on
+            // a doorway jamb half a unit short of its target — level 1's door and catwalk fights
+            // never landed a shot because of it. Doors and lifts keep the old reach.
+            let radius = if self.types.get(i).copied() == Some(3) {
+                self.templates
+                    .get(i)
+                    .map(|name| name.to_ascii_lowercase())
+                    .and_then(|name| self.template_hit.get(&name).map(|(r, _)| *r))
+                    .unwrap_or(0.02)
+                    .max(0.02)
+            } else {
+                0.4
+            };
+            let (resolved, hit) = solids.resolve_stepped(sector, t.pos, radius);
+            // A push-out is one signal; a fast mover can also step clean through a plane between
+            // two frames, so "the new position is in no sector" counts too. That is the swept
+            // test a position-only resolver cannot make.
+            let escaped = solids.sector_at(t.pos, 0.1).is_none();
+            // A **projectile** that reaches a surface dies there: the engine's
+            // `sithThing_Update` explodes the weapon and removes it, while a stopped-but-alive
+            // bolt froze mid-air (its `vel` zeroed, its damage live) and could never hit again.
+            // A `_debris` body is `type=weapon` but rubble, not a shot: it has to land on the
+            // vertical stop below instead of dying on the first surface it brushes (round 246's
+            // gate). Keying on the gravity bit was wrong: shipped projectiles fall too
+            // (`+grenade2 physflags=0x225`, `08tiebomb`), so the template family is the test.
+            let projectile = self.types.get(i).copied() == Some(3)
+                && !self.templates.get(i).is_some_and(|template| {
+                    self.template_debris
+                        .contains(&template.to_ascii_lowercase())
+                });
+            let mut lost = false;
+            let mut stopped = false;
+            if hit && (resolved[0] - t.pos[0]).abs() + (resolved[1] - t.pos[1]).abs() > 0.01 {
+                if std::env::var_os("BK_AI_TRACE").is_some() && projectile {
+                    eprintln!("ai: shot {i} hit a surface at {:?} (push to {:?}, sector {sector})", t.pos, resolved);
                 }
-                // A projectile is not a 0.4-radius body: the engine collides it by its template's
-                // own `movesize` (`+bryarbolt` is 0.001), and the fixed 0.4 made every bolt stop on
-                // a doorway jamb half a unit short of its target — level 1's door and catwalk fights
-                // never landed a shot because of it. Doors and lifts keep the old reach.
-                let radius = if self.types.get(i).copied() == Some(3) {
-                    self.templates
-                        .get(i)
-                        .map(|name| name.to_ascii_lowercase())
-                        .and_then(|name| self.template_hit.get(&name).map(|(r, _)| *r))
-                        .unwrap_or(0.02)
-                        .max(0.02)
+                if projectile {
+                    // A **projectile** is a ray, not a body. A plane push that runs *along* the
+                    // flight is the containment resolver sliding it out of a thin sector, not a
+                    // wall (level 1's door fight: +0.02 in +y while the bolt climbed at +2.09);
+                    // only a push that opposes the velocity is a surface in front of it.
+                    let along = (resolved[0] - t.pos[0]) * t.vel[0]
+                        + (resolved[1] - t.pos[1]) * t.vel[1]
+                        + (resolved[2] - t.pos[2]) * t.vel[2];
+                    if along >= 0.0 {
+                        self.sith_track_thing_pivot(pass, i);
+                        return;
+                    }
+                    t.destroyed = true;
+                    lost = true;
                 } else {
-                    0.4
-                };
-                let (resolved, hit) = solids.resolve_stepped(sector, t.pos, radius);
-                // A push-out is one signal; a fast mover can also step clean through a plane between
-                // two frames, so "the new position is in no sector" counts too. That is the swept
-                // test a position-only resolver cannot make.
-                let escaped = solids.sector_at(t.pos, 0.1).is_none();
-                // A **projectile** that reaches a surface dies there: the engine's
-                // `sithThing_Update` explodes the weapon and removes it, while a stopped-but-alive
-                // bolt froze mid-air (its `vel` zeroed, its damage live) and could never hit again.
-                // A `_debris` body is `type=weapon` but rubble, not a shot: it has to land on the
-                // vertical stop below instead of dying on the first surface it brushes (round 246's
-                // gate). Keying on the gravity bit was wrong: shipped projectiles fall too
-                // (`+grenade2 physflags=0x225`, `08tiebomb`), so the template family is the test.
-                let projectile = self.types.get(i).copied() == Some(3)
-                    && !self.templates.get(i).is_some_and(|template| {
-                        self.template_debris
-                            .contains(&template.to_ascii_lowercase())
-                    });
-                if hit && (resolved[0] - t.pos[0]).abs() + (resolved[1] - t.pos[1]).abs() > 0.01 {
-                    if std::env::var_os("BK_AI_TRACE").is_some() && projectile {
-                        eprintln!("ai: shot {i} hit a surface at {:?} (push to {:?}, sector {sector})", t.pos, resolved);
-                    }
-                    if projectile {
-                        // A **projectile** is a ray, not a body. A plane push that runs *along* the
-                        // flight is the containment resolver sliding it out of a thin sector, not a
-                        // wall (level 1's door fight: +0.02 in +y while the bolt climbed at +2.09);
-                        // only a push that opposes the velocity is a surface in front of it.
-                        let along = (resolved[0] - t.pos[0]) * t.vel[0]
-                            + (resolved[1] - t.pos[1]) * t.vel[1]
-                            + (resolved[2] - t.pos[2]) * t.vel[2];
-                        if along >= 0.0 {
-                            continue;
-                        }
-                        lost_shots.push(i);
-                        t.destroyed = true;
-                        continue;
-                    }
                     t.pos[0] = resolved[0];
                     t.pos[1] = resolved[1];
                     t.vel = [0.0; 3];
                     t.target = None;
-                    blocked.push(i);
-                } else if escaped || solids.segment_blocked(previous, t.pos) {
-                    if std::env::var_os("BK_AI_TRACE").is_some() && projectile {
-                        // Which face stopped it: a muzzle inside a jamb and a bolt aimed into a wall
-                        // look identical in the position alone.
-                        eprintln!(
-                            "ai: shot {i} stopped from {:?} to {:?} (escaped {escaped}, blocker {:?})",
-                            previous,
-                            t.pos,
-                            solids.segment_blocked_at(previous, t.pos)
-                        );
-                    }
-                    if projectile {
-                        lost_shots.push(i);
-                        t.destroyed = true;
-                        continue;
-                    }
+                    stopped = true;
+                }
+            } else if escaped || solids.segment_blocked(previous, t.pos) {
+                if std::env::var_os("BK_AI_TRACE").is_some() && projectile {
+                    // Which face stopped it: a muzzle inside a jamb and a bolt aimed into a wall
+                    // look identical in the position alone.
+                    eprintln!(
+                        "ai: shot {i} stopped from {:?} to {:?} (escaped {escaped}, blocker {:?})",
+                        previous,
+                        t.pos,
+                        solids.segment_blocked_at(previous, t.pos)
+                    );
+                }
+                if projectile {
+                    t.destroyed = true;
+                    lost = true;
+                } else {
                     // Put it back where it last made sense and stop it: the segment test is what
                     // catches a mover that stepped clean over a wall between two frames.
                     t.pos = previous;
                     t.vel = [0.0; 3];
                     t.target = None;
-                    blocked.push(i);
+                    stopped = true;
                 }
             }
-            if path_moved || flying {
-                moved.push(i);
+            if lost {
+                // A projectile that dies on geometry is a miss in the encounter chronology.
+                self.note_shot_lost(i);
+                self.sith_track_thing_pivot(pass, i);
+                return;
+            }
+            if stopped {
+                pass.blocked.push(i);
+                for instance in self.thing_instances(i) {
+                    self.pending_messages.push((instance, "blocked", [0.0; 2], None, None));
+                }
             }
         }
-        for index in lost_shots {
-            self.note_shot_lost(index);
+        if path_moved || flying {
+            pass.moved.push(i);
         }
-        for index in &blocked {
-            for instance in self.thing_instances(*index) {
-                self.pending_messages.push((instance, "blocked", [0.0; 2], None, None));
-            }
-        }
+        self.sith_track_thing_pivot(pass, i);
+    }
+
+    /// The frame path's turn and arrival, in the path slot: `RotatePivot`'s pivot turn, then the
+    /// `arrived` a finished frame move sends to the cogs linked to the thing.
+    fn sith_track_thing_pivot(&mut self, pass: &mut ThingPass, index: usize) {
+        let dt = pass.dt;
         // `RotatePivot`: a thing turning about the pivot its frame names, a whole turn of `seconds`.
         // The pose is a function of progress from the pose it started at, so a long frame cannot
         // drift the way an accumulator would.
-        for index in 0..self.things.len() {
-            let Some(spin) = self.things[index].spin.clone() else { continue };
+        if let Some(spin) = self.things[index].spin.clone() {
             let done = (spin.done + dt).min(spin.duration);
             let t = (done / spin.duration.max(1e-4)).clamp(0.0, 1.0);
             let angles = [
@@ -3681,35 +3760,72 @@ impl Runtime {
                 thing.roll = spin.start_angles[2] + angles[2];
                 thing.spin = if done >= spin.duration { None } else { Some(PivotSpin { done, ..spin }) };
             }
-            if !moved.contains(&index) {
-                moved.push(index);
+            if !pass.moved.contains(&index) {
+                pass.moved.push(index);
             }
-            if !turned.contains(&index) {
-                turned.push(index);
+            if !pass.turned.contains(&index) {
+                pass.turned.push(index);
             }
         }
-        // Attached things follow their parent: `sithThing_AttachThingToThing` stores the offset in the
-        // parent's own frame (`rdMatrix_TransformVectorOrtho34` into `field_4C`), and the parent's
-        // motion carries the child from there. A crate riding a lift and a catwalk hanging off a ship
-        // are both this, and so is the sphere `force_absorb.cog` hangs on the player.
-        // A frame path that reaches its target sends `arrived` to the cogs linked to that thing.
-        // The flags were set by the motion loop above; collecting them here returns this step's
-        // arrivals instead of the previous step's.
-        let arrived: Vec<usize> = self
-            .things
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| t.arrived)
-            .map(|(i, _)| i)
-            .collect();
-        for index in &arrived {
-            if let Some(thing) = self.things.get_mut(*index) {
-                thing.arrived = false;
-            }
-            for instance in self.thing_instances(*index) {
+        if let Some(thing) = self.things.get_mut(index)
+            && thing.arrived
+        {
+            thing.arrived = false;
+            pass.arrived.push(index);
+            for instance in self.thing_instances(index) {
                 self.pending_messages.push((instance, "arrived", [0.0; 2], None, None));
             }
         }
+    }
+
+    /// `PlayKey` on a **thing** (a script camera's `MAcamera.key`) moves its pose: the key's single
+    /// node carries the dolly, relative to the pose the key started from. Level 14's opening key walks
+    /// its `droidcam` from (39.47, 11.38, 35.15) to about (39.65, -6.6, 28.4) — onto Kyle — where the
+    /// retail shot looks down at him; without it the view stays at the placed pose. Actors' `PlayKey`
+    /// names a puppet track, whose nodes pose the *model*, so only a key whose single node is a camera
+    /// box is a thing track. `ponytail:` a mesh-name test, not the engine's root-track rule in
+    /// `sithPuppet_UpdateThingMove`; the upgrade path is to read that rule and drop the name test.
+    fn sith_puppet_thing_key(&mut self, pass: &mut ThingPass, thing: usize) {
+        let Some((name, _flags, start)) = self.play_key.get(&thing).cloned() else { return };
+        let Some(key) = self.keys.get(&name) else { return };
+        if key.nodes.len() != 1 {
+            return;
+        }
+        let node = &key.nodes[0];
+        if !node.mesh.to_ascii_lowercase().contains("camera") {
+            return;
+        }
+        let Some(base) = self.key_base.get(&thing).copied() else { return };
+        let Some(pose) = node.at(start as f32 + self.time * key.fps) else { return };
+        if std::env::var_os("BK_KEY_TRACE").is_some() {
+            println!(
+                "key: thing {thing} {name} start {start} time {:.3} fps {} frame {:.2}",
+                self.time,
+                key.fps,
+                start as f32 + self.time * key.fps
+            );
+        }
+        let Some(t) = self.things.get_mut(thing) else { return };
+        let (sin, cos) = base.1.to_radians().sin_cos();
+        t.pos = [
+            base.0[0] + pose.pos[0] * cos - pose.pos[1] * sin,
+            base.0[1] + pose.pos[0] * sin + pose.pos[1] * cos,
+            base.0[2] + pose.pos[2],
+        ];
+        t.yaw = base.1 + pose.rot[1];
+        t.pitch = base.2 + pose.rot[0];
+        t.roll = base.3 + pose.rot[2];
+        if std::env::var_os("BK_KEY_TRACE").is_some() {
+            println!("key: thing {thing} pos now {:?}", t.pos);
+        }
+        pass.moved.push(thing);
+    }
+
+    /// After `sithThing_Update`'s loop: the attached things follow their parents, and the actors
+    /// `ai_tick` walked settle. shortcut: both are remainders. The engine pushes riders inside the
+    /// parent's `MoveThing`, and the walk settle goes away when the AI moves through physics (#110).
+    fn thing_update_end(&mut self, pass: ThingPass, geometry: Option<&crate::collide::Solids>) -> ThingMotion {
+        let ThingPass { mut moved, turned, blocked, arrived, .. } = pass;
         self.update_attachments(&mut moved);
         if let Some(solids) = geometry {
             self.settle_walked(solids, &mut moved);
@@ -7151,20 +7267,20 @@ impl Runtime {
             state.vel = step_vel;
             state.water_surface = surface;
             let submerged = was_wet && state.attach.is_none();
-            let mut delta = crate::collide::Solids::update_thing_physics(
+            let displacement = crate::collide::Solids::update_thing_physics(
                 &mut state, SUB, radius, height, if submerged { 0.0 } else { gravity },
             );
-            if let Some(surface) = state.attach.and_then(|a| a.surface) {
-                let scroll = world.borrow().surface_scroll(surface);
-                for axis in 0..3 { delta[axis] += scroll[axis] * SUB; }
-            }
             let prepared_vz = state.vel[2];
             let start = state.pos;
             let previous = state.sector;
-            let mut find_floor = delta == [0.0; 3] && state.move_type == 1 && state.attach_flags & 8 == 0
-                && state.attach.and_then(|a| a.thing).is_some_and(|t| world.borrow().floor_parent_move(t.thing) == 2);
+            let action = world.borrow().update_move(&state, displacement, SUB);
+            let mut find_floor = action == crate::collide::UpdateMove::FindFloor;
+            let (delta, move_flags) = match action {
+                crate::collide::UpdateMove::Move { delta, flags } => (delta, flags),
+                _ => ([0.0; 3], 0),
+            };
             let traveled = solids.move_thing_with(
-                &mut state, delta, radius, 0,
+                &mut state, delta, radius, move_flags,
                 |state, dir, distance, radius, flags, search| {
                     let rt = world.borrow();
                     if let Some(index) = rt.local_player() { search.exclude_thing(index); }
@@ -7371,17 +7487,13 @@ impl Runtime {
         }
         let thrust_sector = thrust.get(sector).is_some_and(|drive| *drive != [0.0; 3]);
         crate::collide::Solids::apply_attached_drag(&mut state, surf_drag, static_drag, thrust_sector, dt);
-        let mut delta = crate::collide::Solids::update_thing_physics(&mut state, dt, radius, height, gravity);
-        if let Some(surface) = state.attach.and_then(|a| a.surface) {
-            let scroll = self.surface_scroll(surface);
-            for axis in 0..3 { delta[axis] += scroll[axis] * dt; }
-        }
-        if delta == [0.0; 3] && state.attach_flags & 8 == 0
-            && state.attach.and_then(|a| a.thing).is_some_and(|t| self.floor_parent_move(t.thing) == 2)
-        {
-            self.update_floor_attach(solids, index, &mut state, radius, height);
-        } else {
-            self.move_gravity_body_sweep(solids, index, &mut state, delta, radius, height, 0);
+        let displacement = crate::collide::Solids::update_thing_physics(&mut state, dt, radius, height, gravity);
+        match self.update_move(&state, displacement, dt) {
+            crate::collide::UpdateMove::FindFloor => self.update_floor_attach(solids, index, &mut state, radius, height),
+            crate::collide::UpdateMove::Move { delta, flags } => {
+                self.move_gravity_body_sweep(solids, index, &mut state, delta, radius, height, flags);
+            }
+            crate::collide::UpdateMove::Hold => {}
         }
         if std::env::var_os("BK_SEAT_TRACE").is_some() {
             eprintln!("seat: thing {index} z {:.4} vz {:.4} attach {}", state.pos[2], state.vel[2], state.attach.is_some());
@@ -7873,6 +7985,16 @@ impl Runtime {
         }
     }
 
+    /// `sithThing_UpdateMove` (`0x4cc4c0`) for one mover: the attached surface's scroll
+    /// (`sithSurface_DetachThing`) and the attached thing's move type come from the world.
+    fn update_move(
+        &self, state: &crate::collide::MoveState, displacement: [f32; 3], dt: f32,
+    ) -> crate::collide::UpdateMove {
+        let scroll = state.attach.and_then(|a| a.surface).map_or([0.0; 3], |surface| self.surface_scroll(surface));
+        let parent = state.attach.and_then(|a| a.thing).map(|target| self.floor_parent_move(target.thing));
+        crate::collide::Solids::update_move(state, displacement, scroll, dt, parent)
+    }
+
     /// `0x4ce050:71-74`: inverse ortho rotation of the rider's offset.
     fn floor_local_anchor(&self, index: usize, pos: [f32; 3]) -> Option<[f32; 3]> {
         let thing = self.things.get(index)?;
@@ -8106,17 +8228,6 @@ impl Runtime {
                         println!("ai: actor {actor} step held out of the geometry");
                     }
                 }
-            }
-        }
-    }
-
-    /// `sithWeapon_Update`'s decay, one step's worth: damage falls by `rate * dt`, floored
-    /// at `mindamage`. A weapon whose typeflags lack `SITH_WF_DAMAGE_DECAY` (0x4000) keeps
-    /// its damage.
-    fn decay_damage(&mut self, dt: f32) {
-        for thing in &mut self.things {
-            if thing.decay > 0.0 && thing.damage > thing.min_damage {
-                thing.damage = (thing.damage - thing.decay * dt).max(thing.min_damage);
             }
         }
     }
@@ -13663,6 +13774,99 @@ mod tests {
         }
     }
 
+    /// One `_actor`-word gravity body (thing 0, type 2) over a single floor (surface 1) at z 0.
+    fn floored_actor_runtime(pos: [f32; 3], mass: f32) -> Runtime {
+        let mut rt = door_runtime();
+        rt.things[0].pos = pos;
+        rt.things[0].vel = [0.0; 3];
+        // `_actor`'s shipped word: gravity bit, no thruster exemption.
+        rt.things[0].phys_flags = 0x4a4f;
+        rt.templates = vec!["mousebot".into()];
+        rt.types = vec![2];
+        rt.mass.insert(0, mass);
+        let plane = || crate::collide::Plane {
+            normal: [0.0, 0.0, -1.0],
+            point: [0.0; 3],
+            surface: 1,
+        };
+        rt.solids = Some(std::sync::Arc::new(crate::collide::Solids {
+            sectors: vec![vec![plane()]],
+            hull: vec![vec![plane()]],
+            boxes: vec![None],
+            portals: vec![Vec::new()],
+            spheres: vec![([0.0, 0.0, 0.0], 100.0)],
+            things: Default::default(),
+            floors: vec![crate::collide::Face {
+                normal: [0.0, 0.0, -1.0],
+                point: [0.0; 3],
+                verts: vec![[-10.0, -10.0, 0.0], [10.0, -10.0, 0.0], [10.0, 10.0, 0.0], [-10.0, 10.0, 0.0]],
+                surface: 1,
+            }],
+            walls: Vec::new(),
+            wall_of: Default::default(),
+            floor_of: [(1usize, 0usize)].into_iter().collect(),
+            faces: Vec::new(),
+            face_of: Default::default(),
+            portal_faces: Vec::new(),
+            surface_owner: Vec::new(),
+            adjoin_flags: Vec::new(),
+            ..Default::default()
+        }));
+        rt
+    }
+
+    /// `sithThing_Update` (`0x4cc1e0`) resolves its physics bodies in array order inside one
+    /// frame: two actors landing on the same cog-linked floor in the same frame send the floor's
+    /// `entered` (`sithThing_AttachThingToSurface`, `0x4cde80`) in thing order, whichever index
+    /// either body has.
+    #[test]
+    fn two_physics_bodies_resolve_in_array_order_within_one_frame() {
+        let mut rt = floored_actor_runtime([1.0, 0.0, 0.5], 150.0);
+        let first = rt.things[0].clone();
+        rt.things.push(ThingState { pos: [-1.0, 0.0, 0.5], ..first });
+        rt.templates.push("mousebot".into());
+        rt.types.push(2);
+        rt.mass.insert(1, 150.0);
+        rt.surface_flags = vec![0, SITH_SURFACE_COG_LINKED];
+        rt.surface_links.push((0, 0, 1));
+        // Actors (type 2) hear the floor's link.
+        rt.link_masks.insert((SURFACE_SOURCE, 0, 0, 1), 1 << 2);
+        let mut senders = Vec::new();
+        for _ in 0..90 {
+            rt.step(None, 1.0 / 30.0);
+            for (_, message, _, _, identity) in std::mem::take(&mut rt.pending_messages) {
+                if message == "entered" {
+                    senders.push(identity.map(|identity| identity.sender));
+                }
+            }
+            if senders.len() == 2 {
+                break;
+            }
+        }
+        assert_eq!(senders, [Some(0), Some(1)], "the two landings were not resolved in thing order");
+    }
+
+    /// `sithThing_Update` (`0x4cc1e0`): the player's body moves at its own thing index, after the
+    /// things before it and before the things after it — not before or after the whole loop.
+    #[test]
+    fn the_player_moves_at_its_own_thing_index() {
+        let mut rt = door_runtime();
+        let lift = ThingState { target: Some((1.0, 1.0)), ..rt.things[0].clone() };
+        rt.things = vec![lift.clone(), rt.things[0].clone(), lift];
+        rt.templates = vec!["lift".into(), "walkplayer".into(), "lift".into()];
+        rt.types = vec![0, 10, 0];
+        let world = World::new(rt);
+        let mut seen = None;
+        Runtime::sith_thing_update(&world, None, 0.1, || {
+            let rt = world.borrow();
+            seen = Some((rt.things[0].frame, rt.things[2].frame));
+        });
+        let (before, after) = seen.expect("the player's slot never ran");
+        assert!(before > 0.0, "the thing before the player had not moved when the player's slot ran");
+        assert_eq!(after, 0.0, "the thing after the player moved before the player's slot");
+        assert!(world.borrow().things[2].frame > 0.0, "the thing after the player never moved");
+    }
+
     /// `sithPhysics_UpdateThingPhysics`'s gravity arm is not a weapons-only rule: the shipped `_actor`
     /// carries `physflags=0x4a4f` and `mass=150`, so an actor that walks off its floor falls like the
     /// `_debris` goods. The gate is the thing's mass (`+0x204`) as well as the `0x1` bit, and a body
@@ -13670,45 +13874,7 @@ mod tests {
     /// makes with `FindFloor(thing, 1)`), so a placed actor keeps the height the level gave it.
     #[test]
     fn an_actor_off_its_floor_falls_to_the_contact_and_stops() {
-        fn runtime(pos: [f32; 3], mass: f32) -> Runtime {
-            let mut rt = door_runtime();
-            rt.things[0].pos = pos;
-            rt.things[0].vel = [0.0; 3];
-            // `_actor`'s shipped word: gravity bit, no thruster exemption.
-            rt.things[0].phys_flags = 0x4a4f;
-            rt.templates = vec!["mousebot".into()];
-            rt.types = vec![2];
-            rt.mass.insert(0, mass);
-            let plane = || crate::collide::Plane {
-                normal: [0.0, 0.0, -1.0],
-                point: [0.0; 3],
-                surface: 1,
-            };
-            rt.solids = Some(std::sync::Arc::new(crate::collide::Solids {
-                sectors: vec![vec![plane()]],
-                hull: vec![vec![plane()]],
-                boxes: vec![None],
-                portals: vec![Vec::new()],
-                spheres: vec![([0.0, 0.0, 0.0], 100.0)],
-                things: Default::default(),
-                floors: vec![crate::collide::Face {
-                    normal: [0.0, 0.0, -1.0],
-                    point: [0.0; 3],
-                    verts: vec![[-10.0, -10.0, 0.0], [10.0, -10.0, 0.0], [10.0, 10.0, 0.0], [-10.0, 10.0, 0.0]],
-                    surface: 1,
-                }],
-                walls: Vec::new(),
-                wall_of: Default::default(),
-                floor_of: [(1usize, 0usize)].into_iter().collect(),
-                faces: Vec::new(),
-                face_of: Default::default(),
-                portal_faces: Vec::new(),
-                surface_owner: Vec::new(),
-                adjoin_flags: Vec::new(),
-                ..Default::default()
-            }));
-            rt
-        }
+        let runtime = floored_actor_runtime;
 
         // Half a unit over its floor and out of the creation reach: the body falls.
         let mut falling = runtime([0.0, 0.0, 0.5], 150.0);

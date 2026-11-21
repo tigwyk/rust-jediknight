@@ -22,7 +22,7 @@ cog messages	sithCog_SendMessage	0x4debe0	deliver_cog_messages	src/main.rs	porte
 cog messages	sithCog_ThingSendMessageEx	0x4dfaf0	deliver_thing_messages	src/main.rs	ported	
 cog messages	sithCog_SectorSendMessageEx	0x4dfd90	sector_messages	src/runtime.rs	ported	
 damage	sithActor_DamageActor	0x4ecc90	damage_typed	src/runtime.rs	ported	
-ai fire	FUN_00509e40	0x509e40	ai_shots	src/main.rs	ported	
+ai fire	FUN_00509e40	0x509e40	sith_update	src/main.rs	ported	
 ai fire	sithAI_FireWeapon	0x4eba10	fire_with_spread	src/runtime.rs	ported	
 ai fire	sithAI_CanDetectSightThing	0x4ec140	can_detect	src/runtime.rs	ported	
 ai fire	sithWeapon_WeaponFireProjectile	0x4d45a0	fire_with_spread	src/runtime.rs	ported	

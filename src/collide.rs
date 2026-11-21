@@ -947,6 +947,17 @@ impl MoveState {
     }
 }
 
+/// What [`Solids::update_move`] (`sithThing_UpdateMove`, `0x4cc4c0`) decided for one frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum UpdateMove {
+    /// Nothing moves.
+    Hold,
+    /// `sithPhysics_FindFloor(thing, 0)`: a physics rider of a path thing that moved nothing.
+    FindFloor,
+    /// `sithCollision_MoveThing` by `delta` with search flags `flags`.
+    Move { delta: [f32; 3], flags: u32 },
+}
+
 /// `sithCollision_Startup`'s pair-handler table (`DAT_00847f38`, indexed `mover*12 + hit`):
 /// whether the installed handler cell is non-zero. `sithCollision_AddCollisionHandler`
 /// (`0x4e6f40`) mirrors an asymmetric pair into the transposed cell with the swapped flag, so
@@ -2292,6 +2303,39 @@ impl LevelGeometry {
         }
     }
 
+    /// `sithThing_UpdateMove` (`0x4cc4c0`): what one thing's frame does with its move.
+    ///
+    /// - `+0x34 & 8` (an attach that carries the thing) moves nothing (`:20`).
+    /// - A physics thing (`move=physics`) moves by its frame displacement `+0x234`; any other
+    ///   mover by nothing, with `MoveThing` flag 4 (`:22-31`).
+    /// - A surface attach (`+0x34 & 1`) on a scrolling surface (`0x800`) adds `scroll * dt`
+    ///   (`:33-39`). `scroll` is `sithSurface_DetachThing`'s answer: zero unless the surface scrolls.
+    /// - A zero move of a physics thing attached to a path thing (`+0x34 & 6`, parent `move=path`)
+    ///   runs `sithPhysics_FindFloor(thing, 0)` (`:40-46`); any other zero move does nothing.
+    /// - Otherwise `sithCollision_MoveThing` runs with the displacement (`:48-51`).
+    ///
+    /// `parent_move` is the attached thing's move type (`+0x58 -> +0x10`), when there is one.
+    pub fn update_move(
+        state: &MoveState, displacement: [f32; 3], scroll: [f32; 3], dt: f32, parent_move: Option<u32>,
+    ) -> UpdateMove {
+        if state.attach_flags & 8 != 0 {
+            return UpdateMove::Hold;
+        }
+        let (mut delta, flags) = if state.move_type == 1 { (displacement, 0) } else { ([0.0; 3], 4) };
+        if state.attach_flags & 1 != 0 {
+            for axis in 0..3 {
+                delta[axis] += scroll[axis] * dt;
+            }
+        }
+        if delta == [0.0; 3] {
+            if state.move_type == 1 && state.attach_flags & 6 != 0 && parent_move == Some(2) {
+                return UpdateMove::FindFloor;
+            }
+            return UpdateMove::Hold;
+        }
+        UpdateMove::Move { delta, flags }
+    }
+
     /// `sithPhysics_ApplyDrag` (`0x4f5d50`): a body slower than `static_drag` stops dead;
     /// otherwise the velocity loses `min(drag * dt, 1.0)` of itself and components at or under
     /// `0x52319c` (1e-5) snap to zero.
@@ -3522,6 +3566,50 @@ mod tests {
             phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0,
             attach: None, attach_flags: 0, water_surface: None, owner: None,
         }
+    }
+
+    /// `sithThing_UpdateMove` (`0x4cc4c0:40-46`): a physics body attached to a path thing that
+    /// moved nothing this frame runs `FindFloor`, which is what keeps a rider on a lift that has
+    /// stopped; the same zero move with no path parent does nothing at all.
+    #[test]
+    fn a_zero_move_on_a_path_parent_runs_find_floor() {
+        let mut rider = walker();
+        rider.attach_flags = 2;
+        assert_eq!(
+            Solids::update_move(&rider, [0.0; 3], [0.0; 3], 0.02, Some(2)),
+            UpdateMove::FindFloor
+        );
+        assert_eq!(Solids::update_move(&rider, [0.0; 3], [0.0; 3], 0.02, Some(1)), UpdateMove::Hold);
+        // `+0x34 & 8`: the attach carries the thing, and no move of its own runs (`:20`).
+        rider.attach_flags = 8 | 2;
+        assert_eq!(Solids::update_move(&rider, [0.0; 3], [0.0; 3], 0.02, Some(2)), UpdateMove::Hold);
+    }
+
+    /// `sithThing_UpdateMove` (`0x4cc4c0:33-39`): a body attached to a scrolling surface moves by
+    /// its own displacement plus `scroll * dt`; a path mover takes only the scroll, with flag 4.
+    #[test]
+    fn a_scrolling_surface_carries_its_body_by_scroll_times_dt() {
+        let mut body = walker();
+        body.attach_flags = 1;
+        let dt = 0.02;
+        let UpdateMove::Move { delta, flags } = Solids::update_move(&body, [0.1, 0.0, 0.0], [0.0, 2.0, 0.0], dt, None)
+        else {
+            panic!("a body on a scrolling surface did not move");
+        };
+        assert_eq!((delta, flags), ([0.1, 2.0 * dt, 0.0], 0));
+        body.move_type = 2;
+        let UpdateMove::Move { delta, flags } = Solids::update_move(&body, [0.1, 0.0, 0.0], [0.0, 2.0, 0.0], dt, None)
+        else {
+            panic!("a path mover on a scrolling surface did not move");
+        };
+        assert_eq!((delta, flags), ([0.0, 2.0 * dt, 0.0], 4));
+        // Off the surface the scroll does not apply.
+        body.move_type = 1;
+        body.attach_flags = 0;
+        assert_eq!(
+            Solids::update_move(&body, [0.0; 3], [0.0, 2.0, 0.0], dt, None),
+            UpdateMove::Hold
+        );
     }
 
     /// One sphere thing mid-room, with the admission words the case under test needs.

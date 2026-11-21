@@ -9882,7 +9882,7 @@ fn main() {
             println!("things: this level has no templates");
             return;
         };
-        // A **non-player** thing, when there is one: the player's body is integrated by `walk_player`,
+        // A **non-player** thing, when there is one: the player's body is integrated by `sith_update`,
         // so the runtime's own thrust and path-move loop leaves it alone (`Runtime`'s mover loop), and
         // an assertion about that loop has to watch something else.
         let player_at = rt
@@ -13016,6 +13016,7 @@ fn main() {
             ),
         )
         .insert_resource(TriggerCount::default())
+        .init_resource::<ControlFrame>()
         // A hard frame budget runs whatever else is happening, menu open or not: a gate that forgets to
         // quit must not be able to sit on a window (and hang a whole `--gates` sweep).
         .add_systems(Update, (exit_after_frames, engine_fov))
@@ -13026,18 +13027,18 @@ fn main() {
             Update,
             (
                 (
-                    run_pulses_and_timers.before(resume_sleeping_labels),
-                    resume_sleeping_labels,
-                    deliver_thing_messages,
-                    deliver_cog_messages,
+                    // `sithCog_ProcessCogs` is `sithUpdate`'s last slot (`0x4c4c00:41`).
+                    run_pulses_and_timers.after(sith_update).before(resume_sleeping_labels),
+                    resume_sleeping_labels.after(sith_update),
+                    deliver_thing_messages.after(sith_update),
+                    deliver_cog_messages.after(sith_update),
                     use_key,
-                    (live_play_drive.before(walk_player), walk_player),
+                    (live_play_drive.before(read_controls), read_controls.before(sith_update), place_camera.after(sith_update)),
                     cull_sectors,
                     rebuild_surfaces,
                     sky_follows_camera,
                     ambient_follows_view,
                     play_exit,
-                    advance_sim.after(ai_shots),
                 )
                     .run_if(no_screen_open),
                 (demo_aim, health_follows_damage, infrared_follows_force, fire_player, sprite_demo, draw_created, grow_particles, cycle_particle_cels, projectile_hits, respawn_on_death)
@@ -13053,12 +13054,12 @@ fn main() {
                     // fresh runtime, which is why the hand-off itself runs after `swap_level`: the
                     // chain swap -> share -> AI is what makes the new level's first tick see walls.
                     // `encounter.arm` must see the frame's warped body *before* the AI tick: the
-                    // runtime reads the pose `walk_player` publishes, and a tick ahead of the warp
-                    // made the first sample a moved actor (the encounter trace lost actor 272).
-                    ai_shots.after(share_collider).after(walk_player),
+                    // runtime reads the pose `route_replay`'s warp publishes, and a tick ahead of the
+                    // warp made the first sample a moved actor (the encounter trace lost actor 272).
+                    sith_update.after(share_collider).after(route_replay),
                     play_requested_sounds,
                     music_follows_scripts,
-                    show_taken.after(walk_player),
+                    show_taken.after(sith_update),
                     animate_actors,
                     actors_follow_runtime,
                     things_follow_geomode,
@@ -13074,7 +13075,7 @@ fn main() {
                     watch_level_complete,
                     audio_trace_sample
                         .after(route_replay)
-                        .after(walk_player)
+                        .after(sith_update)
                         .after(play_requested_sounds)
                         .after(music_follows_scripts)
                         .before(ambient_follows_view),
@@ -13091,8 +13092,8 @@ fn main() {
             (
                 // `use_key` reads `RouteNow` too: without this edge the `use` row can be published
                 // after the key system ran, and the press is lost for the rest of the replay.
-                route_replay.before(walk_player).before(use_key),
-                goal_probe.after(walk_player).before(cull_sectors),
+                route_replay.before(read_controls).before(use_key),
+                goal_probe.after(sith_update).before(place_camera).before(cull_sectors),
             )
                 .run_if(no_screen_open),
         )
@@ -14560,7 +14561,7 @@ struct ViewmodelCamera;
 struct OverlayQuad;
 
 /// The camera the player looks through. The overlay screens spawn their own `Camera3d`s (the HUD at
-/// order 2 and the screen tint at order 1), so "the `Camera3d`" is ambiguous: `walk_player` used
+/// order 2 and the screen tint at order 1), so "the `Camera3d`" is ambiguous: `place_camera` used
 /// `single_mut()` on `(With<Camera3d>, Without<OverlayQuad>)`, which matched three entities and
 /// returned early every frame. The result was a body that never moved, however the keys were
 /// pressed. A marker on the world camera is the smallest fix that names it.
@@ -18044,7 +18045,7 @@ fn sample_audio_state(
 /// The music selection and volume and the sector ambience are read straight from the runtime, so
 /// they are the values the mixer would use; the one-shots come from [`AudioLog`], which
 /// `play_requested_sounds` fills with the gain each sound actually played at. Ordered after both
-/// (`route_replay` moves the cursor, `walk_player` places the body) so a sample describes the
+/// (`route_replay` moves the cursor, `sith_update` moves the body) so a sample describes the
 /// frame's own tick.
 fn audio_trace_sample(
     replay: Option<Res<RouteReplay>>,
@@ -19050,7 +19051,7 @@ struct WalkResult {
 ///
 /// Starts at the level's own `walkplayer` thing — where the game puts you — and holds
 /// "forward" for the requested number of frames by calling `Runtime::step_player`, the same
-/// entry `walk_player` calls in the window: one body, one integration and one sweep, so the
+/// entry `sith_update` calls in the window: one body, one integration and one sweep, so the
 /// probe and the game cannot disagree about how a body walks. A level whose geometry and
 /// sector table disagree shows up here as a walker that leaves its sector, or one that never
 /// stops against a wall.
@@ -19131,7 +19132,7 @@ fn walk_level(
         .map(|f| f.point[2])
         .fold(f32::INFINITY, f32::min);
 
-    // The probe drives `Runtime::step_player` — the entry the window's `walk_player` and the live
+    // The probe drives `Runtime::step_player` — the entry the window's `sith_update` and the live
     // checks use — instead of resolving a body of its own, so a leg this probe says walks is a leg
     // the game walks, with the same target assembly, drag ramp, sub-steps and environment.
     let mut rt = runtime::Runtime::new_with_geometry(level, &solids);
@@ -21936,7 +21937,7 @@ fn cel_v(v: f32, cel: f32, cels: f32) -> f32 {
 ///
 /// The level places its player starts as `walkplayer` rows — `03katarn.jkl` has four, `01narshadda`
 /// twelve — and they are the multiplayer spawn points, not NPCs. The app's walker takes the first of
-/// them (`walk_player` looks up exactly this name), so only the first is the local player; retail's
+/// them (`read_controls` looks up exactly this name), so only the first is the local player; retail's
 /// single-player does not draw or collide the rest (the `route_*` parity pairs exposed the drawn
 /// ones: a Kyle model filled the camera at the level-1 multiplayer starts).
 fn is_local_player(template: &str) -> bool {
@@ -22694,7 +22695,7 @@ fn spawn_sky(
 
 /// Draw the actors where the runtime has them.
 ///
-/// The chase is the runtime's (`Runtime::ai_tick`, driven by `ai_shots`): it moves the thing with
+/// The chase is the runtime's (`Runtime::ai_tick`, driven by `sith_update`): it moves the thing with
 /// the class's own `sightdist`/`fov` and the template's speed. What was missing is this half —
 /// the meshes stayed where the level placed them, so an actor could chase and shoot from a spot
 /// it had long left. Each part keeps its offset; only the delta is applied.
@@ -22707,7 +22708,7 @@ fn actors_follow_runtime(
     let (Some(sim), Some(mut actors)) = (sim, actors) else { return };
     let runtime = sim.world.borrow();
     // The walkplayer is an actor too, but its drawn body is not what the runtime's position
-    // means: the camera is placed by `walk_player`, so moving its parts by this delta would
+    // means: the camera is placed by `place_camera`, so moving its parts by this delta would
     // fight that every frame.
     let local_player = runtime
         .templates
@@ -24194,7 +24195,7 @@ fn goal_probe(
     //
     // Re-assert it **every frame** rather than once: the walker recomputes the tracked sector from
     // the body's position, and the renderer's sighting pass keys off that sector, so a one-shot
-    // teleport left this gate at the mercy of the schedule's order between the probe, `walk_player`
+    // teleport left this gate at the mercy of the schedule's order between the probe, `place_camera`
     // and `cull_sectors` — it passed for months and then failed when an unrelated system changed the
     // order. The registration orders these three explicitly, and the pose stays put until the level
     // ends. This is a synthetic observation, so pinning the body is the honest thing to do.
@@ -24484,7 +24485,7 @@ fn force_economy_probe(probe: Res<ForceEconomyProbe>, mut exit: MessageWriter<Ap
 ///
 /// `--force jump` runs the power in a throwaway VM, so its pulses never tick and no second loop can
 /// spend its impulse. This one goes through the real path: `items.dat`'s cog is started by the loader,
-/// `activated`/`deactivated` arrive as messages, and `walk_player` turns the script's `SetThingVel` into
+/// `activated`/`deactivated` arrive as messages, and `sith_update` turns the script's `SetThingVel` into
 /// the body's vertical speed.
 #[derive(Resource, Default)]
 struct ForceProbe {
@@ -24693,7 +24694,7 @@ fn live_play_drive(
     if !state.enabled {
         return;
     }
-    // `walk_player` returns early when `cam.single_mut()` fails, which would leave the body frozen no
+    // `place_camera` returns early when `cam.single_mut()` fails, which would leave the view frozen no
     // matter what the keyboard says. Say how many cameras the query sees before blaming input.
     if std::env::var_os("BK_LIVE_PLAY_TRACE").is_some() {
         println!("live-play: {} camera(s) match the walker's query", cam.iter().count());
@@ -25094,7 +25095,7 @@ fn live_check(
     if !state.enabled || *said {
         return;
     }
-    // A few frames in, so `setup` has run and the first `ai_shots` tick has happened.
+    // A few frames in, so `setup` has run and the first `sith_update` AI tick has happened.
     *elapsed += 1;
     // Long enough for a one-second pulse to have fired.
     if *elapsed < 100 {
@@ -27629,7 +27630,7 @@ struct EncounterTrace {
     next_sample: f32,
     disabled: bool,
     /// The first frame at the encounter pose has been recorded. The frame the app starts can still
-    /// see the level's spawn pose (the warp lands in `walk_player`, which may run after this one).
+    /// see the level's spawn pose (the warp lands in `route_replay`, which runs before this one).
     started: bool,
 }
 
@@ -27815,37 +27816,6 @@ fn event_time(event: &runtime::EncounterEvent) -> f32 {
         | runtime::EncounterEvent::Miss { t, .. }
         | runtime::EncounterEvent::Hit { t, .. } => *t,
     }
-}
-
-/// Give every actor its `.ai` instinct class, and let the armed ones shoot at the player.
-///
-/// The instinct scheduler's weights are not implemented (see `Runtime::ai_tick`); what this
-/// does use is the file's own `sightdist=` and `fov=`, and the actor's own `weapon=`.
-fn ai_shots(capture: Option<Res<CaptureDt>>, 
-    time: Res<Time>,
-    sim: Option<Res<Sim>>,
-    disabled: Option<Res<AiDisabled>>,
-    mut encounter: Local<EncounterTrace>,
-) {
-    // The route capture's `--no-ai`: retail runs the same route under `disableai`, so the AI tick
-    // (and its encounter sampling) is skipped and the scripted movement is measured alone.
-    if disabled.is_some_and(|d| d.0) { return; }
-    let Some(sim) = sim else { return };
-    let dt = sim_dt(&time, capture.as_deref());
-    let mut rt = sim.world.borrow_mut();
-    let Some(index) = rt.templates.iter().position(|t| t.eq_ignore_ascii_case("walkplayer"))
-    else {
-        return;
-    };
-    // `step_player` publishes the body onto the player thing; the AI reads that published eye
-    // point and never writes the pose itself — one body, one writer.
-    encounter.arm(&mut rt, index);
-    encounter.sample(&rt, index);
-    let fired = rt.ai_tick(index, dt);
-    if fired > 0 {
-        println!("ai: {fired} shot(s) at the player");
-    }
-    encounter.record(&mut rt, index);
 }
 
 /// Swap the sector ambience when the player enters a sector with a different `SOUND`.
@@ -28777,7 +28747,7 @@ fn setup(
     }
     // The walker: same code path as `--walk`, with the level's `walkplayer` as its start.
     let solids = &geometry;
-    // The body's centre, not the eye: `walk_player` adds `PLAYER_EYE` when it places the
+    // The body's centre, not the eye: `place_camera` adds `PLAYER_EYE` when it places the
     // camera, so seeding the eye here put the camera one eye-height too high.
     // `--stand <template>`: stand in that thing's own sector and face it, which is how an
     // actor's chase is watched in the window rather than only asserted in `--ai`.
@@ -29732,7 +29702,7 @@ struct ShotFrame(u32);
 struct RouteReplay(Option<RoutePlan>);
 
 /// `--no-ai`: the replay's AI switch. Set only for a capture (see [`no_ai_capture_switch`]); the
-/// `ai_shots` tick returns early while it is set.
+/// `sith_update` AI tick is skipped while it is set.
 #[derive(Resource, Default)]
 struct AiDisabled(bool);
 
@@ -29790,7 +29760,7 @@ struct AudioLog {
 #[derive(Resource, Default)]
 struct AudioScheduleOut(Option<std::path::PathBuf>);
 
-/// The script's input for the tick `route_replay` is on, read by `walk_player`. `None` outside a
+/// The script's input for the tick `route_replay` is on, read by `read_controls`. `None` outside a
 /// replay and on the final tick.
 #[derive(Resource, Default)]
 struct RouteNow(Option<RouteInput>);
@@ -29808,7 +29778,7 @@ struct RouteCursor {
 }
 
 impl RouteCursor {
-    /// Advance one replay tick. `step` is `CaptureDt`, the value `sim_dt` and `walk_player` hand the
+    /// Advance one replay tick. `step` is `CaptureDt`, the value `sim_dt` and `read_controls` hand the
     /// engine that frame, so the clock and the simulation cannot disagree.
     fn advance_engine_clock(&mut self, step: f32) {
         self.tick += 1;
@@ -29965,24 +29935,102 @@ struct Sim {
 #[derive(Resource)]
 struct Deliver(bool);
 
-/// Step the scripts' world and push the moved things' poses into the renderer.
+/// `sithUpdate` (`0x4c4c00`): one frame of the world in the engine's order, then the moved things'
+/// poses pushed into the renderer.
+///
+/// 1. `sithTime_Advance` and the spawned items' class scripts;
+/// 2. the sound mixer and the events ([`runtime::Runtime::sith_update_head`]);
+/// 3. messages: the port's queue is delivered in the cog slot, after this system;
+/// 4. `sithAI_Process`, skipped under `--no-ai` the way `DAT_008ee66c & 1` skips it;
+/// 5. `sithSurface_Tick` ([`runtime::Runtime::sith_surface_tick`]);
+/// 6. `sithControl_Update`: [`read_controls`] ran before this system, and its intent moves the
+///    body at the player's own thing index;
+/// 7. `sithThing_Update` ([`runtime::Runtime::sith_thing_update`]);
+/// 8. `sithCog_ProcessCogs`: the pulse, timer, sleep and message systems run after this one.
 ///
 /// The step settles the actors the AI tick walked, so it gets the level's collider view from here
 /// rather than keeping a second copy of it on the runtime. `BK_NO_SOLIDS` only turns off the
 /// collision arm in `share_collider`; the AI settle is a motion responsibility and still runs.
-fn advance_sim(
+#[allow(clippy::too_many_arguments)]
+fn sith_update(
     capture: Option<Res<CaptureDt>>,
     time: Res<Time>,
-    sim: Option<ResMut<Sim>>,
+    (sim, mut count): (Option<ResMut<Sim>>, Option<ResMut<TriggerCount>>),
+    world: Option<Res<World>>,
     collisions: Option<Res<Collision>>,
+    shapes: Option<Res<SolidShapes>>,
+    mut player: Option<ResMut<Player>>,
+    control: Option<ResMut<ControlFrame>>,
+    disabled: Option<Res<AiDisabled>>,
+    mut encounter: Local<EncounterTrace>,
     mut drawn: Query<&mut Transform>,
 ) {
     let Some(mut sim) = sim else { return };
+    let dt = sim_dt(&time, capture.as_deref());
+    // 1. `sithTime_Advance` (`0x4dd640`).
+    sim.world.borrow_mut().advance_game_clock(dt);
+    if let Some(world) = world.as_deref() {
+        bind_spawned_item_cogs(world, &mut sim);
+    }
+    // A door or lift follows its frame path, and the engine collides a body against the thing where
+    // it is now. The cylinders were built from the level file's own placements, so a leaf that had
+    // already slid aside still blocked: `18Ascend` spawns the player between two elevator leaves and
+    // the frozen closed pair pinned the body for the whole leg. The things also resolve by template
+    // (#83): a `CreateThing` spawn — past the placements or in a destroyed thing's reused slot —
+    // collides with its own template's shape, not the placement list's word for that index.
+    if let (Some(solids), Some(shapes)) = (collisions.as_deref(), shapes.as_deref()) {
+        let world = sim.world.borrow();
+        solids.0.set_things(shapes.place(&world.things, &world.templates));
+    }
+    // 2. The sound mixer and the events.
+    sim.world.borrow_mut().sith_update_head(dt);
+    // 4. `sithAI_Process`. The route capture's `--no-ai`: retail runs the same route under
+    // `disableai`, so the AI tick (and its encounter sampling) is skipped and the scripted
+    // movement is measured alone.
+    if !disabled.is_some_and(|d| d.0) {
+        let mut rt = sim.world.borrow_mut();
+        if let Some(index) = rt.templates.iter().position(|t| t.eq_ignore_ascii_case("walkplayer")) {
+            // `step_player` publishes the body onto the player thing; the AI reads that published
+            // eye point and never writes the pose itself — one body, one writer.
+            encounter.arm(&mut rt, index);
+            encounter.sample(&rt, index);
+            let fired = rt.ai_tick(index, dt);
+            if fired > 0 {
+                println!("ai: {fired} shot(s) at the player");
+            }
+            encounter.record(&mut rt, index);
+        }
+    }
+    // 5. `sithSurface_Tick`.
+    sim.world.borrow_mut().sith_surface_tick(dt);
+    // 6-7. `sithThing_Update`, with the control's intent consumed at the player's index.
     let geometry = collisions.as_ref().map(|c| c.0.as_ref());
-    let motion = sim
-        .world
-        .borrow_mut()
-        .step(geometry, sim_dt(&time, capture.as_deref()));
+    let handle = sim.world.clone();
+    let mut control = control;
+    let input = control.as_mut().and_then(|frame| frame.input.take());
+    let step = control.as_ref().map_or(dt, |frame| frame.dt);
+    let mut fired = 0;
+    let mut crossed = false;
+    let motion = runtime::Runtime::sith_thing_update(&handle, geometry, dt, || {
+        let (Some(input), Some(player), Some(solids), Some(world)) =
+            (input, player.as_deref_mut(), collisions.as_deref(), world.as_deref())
+        else {
+            return;
+        };
+        let rules = player.rules;
+        crossed = runtime::Runtime::step_player(
+            &handle, &mut player.body, &solids.0, input, &rules, step,
+            || {
+                fired += pump_movement_messages(&world.cogs, &mut sim);
+            },
+        );
+    });
+    if let Some(count) = count.as_mut() {
+        count.0 += fired;
+    }
+    if let Some(frame) = control.as_mut() {
+        frame.crossed = crossed;
+    }
     // The thing's **whole** pose, in the engine's own basis: `thing_quat` is what `spawn` uses, and
     // `from_rotation_z(-yaw)` (this path's original form) is that basis with the yaw negated, so a
     // moved door or lift was drawn mirrored about its facing. A placed thing that spins (`angvel=`
@@ -30198,9 +30246,9 @@ fn sky_follows_camera(
     }
 }
 
-/// `--replay`: advance the scripted route one tick and hand `walk_player` this tick's input.
+/// `--replay`: advance the scripted route one tick and hand `read_controls` this tick's input.
 ///
-/// It runs **before** `walk_player` so a leg's warp is in place for that leg's first step, and it
+/// It runs **before** `read_controls` so a leg's warp is in place for that leg's first step, and it
 /// writes the sampled trace row before the step, the same point in the tick a retail `coords` poll
 /// records: tick 0 is the leg's start pose, and every 36th tick is that many 1/60 s steps later.
 /// The route's final tick has no input; its row is the last sampled state and the run ends.
@@ -30306,7 +30354,7 @@ fn route_replay(
             &mut prev.latched,
         );
     }
-    // The clock advances by the step the simulation was handed this frame (`sim_dt`/`walk_player`),
+    // The clock advances by the step the simulation was handed this frame (`sim_dt`/`read_controls`),
     // so sample `k` records `k` steps of engine time — the same instants the retail fixture's holds
     // were polled at, and never a wall-clock one.
     let step = capture.as_deref().and_then(|c| c.0).unwrap_or(1.0 / 60.0);
@@ -30322,12 +30370,24 @@ fn route_replay(
     now.0 = Some(input);
 }
 
-/// `walk_player`'s persistent state: the trace frame counter and the transliterated
-/// `stdControl` key arrays.
+/// `read_controls`' persistent state: the transliterated `stdControl` key arrays.
 #[derive(Default)]
 struct WalkerState {
-    trace_tick: u32,
     control: control::StdControl,
+}
+
+/// `sithControl_Update`'s output for this frame (`0x4d6c70`): the player's movement intent, read
+/// before `sithUpdate`'s thing loop and consumed at the player's own thing index.
+#[derive(Resource, Default)]
+struct ControlFrame {
+    /// The intent; `None` once consumed, or when no control was read this frame.
+    input: Option<runtime::PlayerInput>,
+    /// The walker's step for this frame.
+    dt: f32,
+    /// Whether the control was read: the camera and the trace follow only a stepped body.
+    read: bool,
+    /// The player's body crossed a sector in its move.
+    crossed: bool,
 }
 
 /// Spawned items do not come from the placed class-COG loop. Give them the same instance
@@ -30362,56 +30422,36 @@ fn bind_spawned_item_cogs(world: &World, sim: &mut Sim) {
     }
 }
 
-/// The player: a walker bound to the level's own sectors, so walls stop it and doorways
-/// let it through. Arrow keys look, `WASD` moves, `Shift` runs, `Space` jumps.
+/// `sithControl_Update` (`0x4d6c70`): read the keys, the mouse look and the replay row into the
+/// player's movement intent. Arrow keys look, `WASD` moves, `Shift` runs, `Space` jumps. The body
+/// moves at its own thing index in [`sith_update`]; [`place_camera`] places the view afterwards.
 ///
 /// This is the `--walk` sweep's code path (`walker_step`) with a keyboard for input, so
 /// the movement the sweep verifies is the movement the window runs.
 #[allow(clippy::too_many_arguments)]
-fn walk_player(capture: Option<Res<CaptureDt>>, 
+fn read_controls(capture: Option<Res<CaptureDt>>,
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     world: Option<Res<World>>,
     solids: Option<Res<Collision>>,
-    shapes: Option<Res<SolidShapes>>,
-    (mut sim, mut count): (Option<ResMut<Sim>>, Option<ResMut<TriggerCount>>),
+    sim: Option<Res<Sim>>,
     mut player: Option<ResMut<Player>>,
     overview: Res<Overview>,
     near: Res<Near>,
     mouse: Res<bevy::input::mouse::AccumulatedMouseMotion>,
     overlay: Option<Res<Overlay>>,
-    // The overlay camera is a `Camera3d` too, so it must be excluded or `single_mut` fails and
-    chase: ResMut<Chase>,
-    // the walker's view never moves (which is what happened for every round before this one).
-    mut cam: Query<&mut Transform, (With<Camera3d>, With<WorldCamera>)>,
-    // `--trace-out`'s frame counter and the engine's control state (`stdControl`'s per-key
-    // arrays) in one `Local`: Bevy systems take at most 16 params, and both must persist.
+    // The engine's control state (`stdControl`'s per-key arrays) persists across frames.
     mut walker: Local<WalkerState>,
     // `--replay`: this tick's scripted input, published by `route_replay` before this system.
     route_now: Option<Res<RouteNow>>,
+    mut frame: ResMut<ControlFrame>,
 ) {
-    if let Some(sim) = sim.as_deref_mut() {
-        sim.world.borrow_mut().advance_game_clock(sim_dt(&time, capture.as_deref()));
-        if let Some(world) = world.as_deref() {
-            bind_spawned_item_cogs(world, sim);
-        }
-    }
+    *frame = ControlFrame::default();
     let (Some(solids), Some(player)) = (solids, player.as_mut()) else { return };
-    // A door or lift follows its frame path, and the engine collides a body against the thing where
-    // it is now. The cylinders were built from the level file's own placements, so a leaf that had
-    // already slid aside still blocked: `18Ascend` spawns the player between two elevator leaves and
-    // the frozen closed pair pinned the body for the whole leg. The things also resolve by template
-    // (#83): a `CreateThing` spawn — past the placements or in a destroyed thing's reused slot —
-    // collides with its own template's shape, not the placement list's word for that index.
-    if let (Some(sim), Some(shapes)) = (sim.as_deref(), shapes.as_deref()) {
-        let world = sim.world.borrow();
-        solids.0.set_things(shapes.place(&world.things, &world.templates));
-    }
     // `--overview` and `--near` exist to frame a fixed shot; a walker would fight them.
     if overview.overview || near.0.is_some() {
         return;
     }
-    let Ok(mut tf) = cam.single_mut() else { return };
     // A capture runs on a fixed step, so the same command reaches the same pose every time: with the
     // wall-clock delta, the player was still falling at one frame count and settled at another, and
     // two identical runs differed in half their pixels (§16.13).
@@ -30680,23 +30720,33 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
             solids.0.floor_below(sector, pos)
         );
     }
-    let rules = player.rules;
-    let crossed = if let (Some(sim), Some(world)) = (sim.as_deref_mut(), world.as_deref()) {
-        let handle = sim.world.clone();
-        let mut fired = 0;
-        let crossed = runtime::Runtime::step_player(
-            &handle, &mut player.body, &solids.0, input, &rules, dt,
-            || {
-                fired += pump_movement_messages(&world.cogs, sim);
-            },
-        );
-        if let Some(count) = count.as_mut() {
-            count.0 += fired;
-        }
-        crossed
-    } else {
-        false
-    };
+    frame.input = Some(input);
+    frame.dt = dt;
+    frame.read = true;
+}
+
+/// After the frame's [`sith_update`]: the walk trace row, the sector print and the view placed
+/// from the moved body.
+#[allow(clippy::too_many_arguments)]
+fn place_camera(
+    sim: Option<Res<Sim>>,
+    player: Option<Res<Player>>,
+    solids: Option<Res<Collision>>,
+    chase: ResMut<Chase>,
+    // The overlay camera is a `Camera3d` too, so it must be excluded or `single_mut` fails and
+    // the walker's view never moves (which is what happened for every round before this one).
+    mut cam: Query<&mut Transform, (With<Camera3d>, With<WorldCamera>)>,
+    frame: Res<ControlFrame>,
+    // `--trace-out`'s frame counter.
+    mut trace_tick: Local<u32>,
+) {
+    if !frame.read {
+        return;
+    }
+    let (Some(solids), Some(player)) = (solids, player) else { return };
+    let Ok(mut tf) = cam.single_mut() else { return };
+    let dt = frame.dt;
+    let crossed = frame.crossed;
     let sector = player.body.sector;
     let vy = player.body.vy;
     // Phase 0.5 trace v0: one line per frame, so a retail walk trace (`coords` polled on a cadence)
@@ -30704,7 +30754,7 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     // shields are what `coords` cannot carry; they are here because the port's body has them.
     if let Some(path) = TRACE_OUT.get() {
         use std::io::Write;
-        if walker.trace_tick == 0
+        if *trace_tick == 0
             && let Ok(mut file) = std::fs::OpenOptions::new()
                 .create(true)
                 .write(true)
@@ -30729,8 +30779,8 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
             let _ = writeln!(
                 file,
                 "{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{}\t{:.3}\t{:.1}\t{:.1}",
-                walker.trace_tick,
-                f64::from(walker.trace_tick) * f64::from(dt),
+                *trace_tick,
+                f64::from(*trace_tick) * f64::from(dt),
                 player.body.pos.x,
                 player.body.pos.y,
                 player.body.pos.z,
@@ -30740,7 +30790,7 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
                 shields
             );
         }
-        walker.trace_tick += 1;
+        *trace_tick += 1;
     }
     if std::env::var_os("BK_JUMP_TRACE").is_some() {
         eprintln!(
@@ -31537,14 +31587,14 @@ mod registration_tests {
             "the collider hand-off is unordered with a level swap: the swap's fresh runtime reaches the AI tick with no geometry"
         );
         assert!(
-            source.contains("ai_shots.after(share_collider).after(walk_player)"),
-            "ai_shots is unordered with walk_player: the encounter's arm can read a body one tick before the warp, so the trace origin and sample count drift between runs"
+            source.contains("sith_update.after(share_collider).after(route_replay)"),
+            "sith_update is unordered with the replay: the encounter's arm can read a body one tick before the warp, so the trace origin and sample count drift between runs"
         );
     }
 
     /// The same invariant, driven rather than read: a level swap installs a fresh runtime and a
     /// fresh collider record, the hand-off follows, and the AI tick follows both. `share_collider`
-    /// and `ai_shots` are the real systems; only the swap is a local stand-in, because the real
+    /// and `sith_update` are the real systems; only the swap is a local stand-in, because the real
     /// `swap_level` reads the archives.
     ///
     /// The control at the top is what makes the wall meaningful: with no hand-off the actor does
@@ -31643,7 +31693,7 @@ mod registration_tests {
             .insert_resource(fresh_sim(&walled_level()))
             .add_systems(
                 Update,
-                (level_swap, share_collider.after(level_swap), ai_shots.after(share_collider)),
+                (level_swap, share_collider.after(level_swap), sith_update.after(share_collider)),
             );
         app.update();
         let sim = app.world().resource::<Sim>();

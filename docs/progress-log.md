@@ -7914,3 +7914,45 @@ t = 0.77 s) and fires, because the port's AI scheduler is still an approximation
 move the replay's tick 0. Open question for the user: retail's Rodian 207 (and the cantina actors 181,
 182, 272) positions at the route's tick 0, which only a retail `coords`/thing dump at the route start
 can answer.
+
+## #109: the tick skeleton (spec #108)
+
+`sithUpdate` (`0x4c4c00`) now runs in the engine's order from one Bevy system, `sith_update`:
+`sithTime_Advance`, the sound mixer and events (`Runtime::sith_update_head`), `sithAI_Process`
+(`ai_tick`, skipped under `--no-ai`), `sithSurface_Tick` (`Runtime::sith_surface_tick`), and
+`sithThing_Update` (`Runtime::sith_thing_update`, `0x4cc1e0`). `read_controls` (`sithControl_Update`)
+runs before it and `place_camera` after it; the pulse, timer, sleep and message systems
+(`sithCog_ProcessCogs`) are ordered after it. `walk_player`, `ai_shots` and `advance_sim` are gone.
+
+`Runtime::step` is split into the engine's per-thing slots instead of whole-world passes: lifetime,
+`sithCog_UpdateThingTimer` (timer and pulse), the type arms (`sithWeapon_Update`'s damage decay,
+`sithPlayer_Update`'s tint and mana), physics or the frame path with `RotatePivot` and `arrived`, and
+the puppet slot (a thing-track `PlayKey`). The player's body moves at its own thing index through a
+callback the loop calls with the runtime released. `sithThing_UpdateMove` (`0x4cc4c0`) is one function,
+`Solids::update_move`, which the player's sub-steps and `move_gravity_body` both call; it adds the
+`+0x34 & 8` hold the port's inline copies lacked. Remainders keep named slots: the AI walk (#110),
+`sithActor_Update` (#111), explosions, particles, the weapon movement arms, the puppet and
+`sithSurface_Tick`'s internals.
+
+A/B against `d760bb1` (same session): the unit suite (474) and `--ai`, `--things`, `--collide`,
+`--fall`, `--pickup`, `--hit`, `--attach`, `--walk all`, `--soak-all`, `--tour`, `--cog-check` pass on
+both. The trace gate is identical (2 drifts: `walk_cantina` 24 %, `walk6_spawn` 5 sectors). Every
+route trace (levels 1, 2 and the 2/3/4/6 chains) is byte-identical to the baseline's. The audio trace
+differs in one one-shot gain (0.626 to 0.627) and the encounter trace's hits land one or two frames
+earlier (a shot fired in `sithAI_Process` now flies in the same frame's thing loop, as in the engine);
+the encounter gate reads 0 drifts on both.
+
+Oracles re-recorded, with their reasons:
+
+- `level1-route-port.tsv`, `level1-audio-port.tsv`, `level1-audio-door-port.tsv` and
+  `level1-audio-schedule.tsv`: the game install's `Resource/Res1hi.gob` was a 68-byte stub from
+  Nov 18 until the user repaired it, so the oracles re-recorded in that window (#99's) carry no
+  one-shots (`landbasic01.wav`, `reeyee02.wav`, the trooper shots). The baseline build reproduces the
+  new files exactly except the one gain above. The audio oracle's ambient volume 0.3 at ticks 36-180
+  (sector 339 against 349) is #99's spawn wedge (#106).
+- `audio-gate.ps1`: its retail comparisons (the route state and the door fade) now report `DRIFT`,
+  like the other gates (#107). Its one-shot self-check chose a once-only wav; with the sounds back,
+  every wav recurs, so it now chooses a row whose wav does not recur within 72 ticks.
+
+Open, pre-existing (the baseline fails the same way): the level-2 route and the 2/3/4/6 chain route
+gates fail their port oracles on position (level 2 tick 36: sector 22 against 29).
