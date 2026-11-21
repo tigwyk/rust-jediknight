@@ -3286,8 +3286,8 @@ impl Runtime {
             (pass, count)
         };
         for index in 0..count {
-            world.borrow_mut().sith_thing_update_one(&mut pass, geometry, index);
-            if Some(index) == pass.player_at {
+            let active = world.borrow_mut().sith_thing_update_one(&mut pass, geometry, index);
+            if active && Some(index) == pass.player_at {
                 // `sithPhysics_UpdateThing` and `sithThing_UpdateMove` for the player's body.
                 player();
             }
@@ -3409,15 +3409,15 @@ impl Runtime {
         pass: &mut ThingPass,
         geometry: Option<&crate::collide::Solids>,
         i: usize,
-    ) {
+    ) -> bool {
         let dt = pass.dt;
-        let Some(flags) = self.things.get(i).map(|t| t.flags) else { return };
+        let Some(flags) = self.things.get(i).map(|t| t.flags) else { return false };
         // A recycled slot (`type == 0`) is skipped; a thing with flag 2 takes the destroyed arm.
         if flags & 2 != 0 {
             if self.types.get(i).copied() != Some(0) {
                 self.sith_thing_free_destroyed(i);
             }
-            return;
+            return false;
         }
         // 1. The lifetime countdown (`0x4cc1e0:24-61`): `timer=`/`SetLifeLeft` reaching zero
         // calls the thing type's destroy function.
@@ -3428,6 +3428,10 @@ impl Runtime {
                 self.life_total.remove(&i);
                 self.sith_thing_destroy_by_type(i);
             }
+        }
+        // `sithThing_Update` gates the remaining arms after processing lifetime.
+        if self.things[i].flags & 0x80000 != 0 {
+            return false;
         }
         // 2. `sithCog_UpdateThingTimer` (thingflags `0x60000`, `0x4cc1e0:64-66`): a passed
         // `SetThingTimer` deadline sends `timer` (4) to the thing's own scripts, which is how
@@ -3472,6 +3476,7 @@ impl Runtime {
         // 7. The puppet slot (`sithPuppet_UpdatePuppet`, `0x4cc1e0:93`): the thing-track `PlayKey`.
         // shortcut: the actors' animation input is still `animate_actors`' in the app.
         self.sith_puppet_thing_key(pass, i);
+        true
     }
 
     /// `sithWeapon_Update`'s decay, one step's worth: damage falls by `rate * dt`, floored
@@ -19770,6 +19775,30 @@ mod tests {
         rt.types = vec![10, 2];
         rt.sector_flags = vec![0; 8];
         rt
+    }
+
+    #[test]
+    fn disabled_things_keep_lifetime_but_skip_tick_and_player_motion() {
+        let mut rt = arm_runtime();
+        rt.things[0].flags |= 0x80000;
+        rt.things[1].flags |= 0x80000;
+        rt.things[1].sector = 7;
+        rt.sector_flags[7] = crate::collide::SECTOR_UNDERWATER;
+        rt.life_left.insert(1, 0.15);
+        let world = World::new(rt);
+        let mut player_steps = 0;
+        Runtime::sith_thing_update(&world, None, 0.1, || player_steps += 1);
+        assert_eq!(player_steps, 0);
+        assert!(world.borrow().air_ms.get(&1).is_none());
+        assert!((world.borrow().life_left[&1] - 0.05).abs() < 1e-5);
+        world.borrow_mut().things[0].flags &= !0x80000;
+        world.borrow_mut().things[1].flags &= !0x80000;
+        Runtime::sith_thing_update(&world, None, 0.01, || player_steps += 1);
+        assert_eq!(player_steps, 1);
+        assert_eq!(world.borrow().air_ms.get(&1), Some(&10));
+        world.borrow_mut().things[1].flags |= 0x80000;
+        Runtime::sith_thing_update(&world, None, 0.1, || player_steps += 1);
+        assert_eq!(world.borrow().types[1], 9, "disabled actor did not expire");
     }
 
     /// `sithActor_Update` (`0x4ecbe0`): 20 000 ms underwater is still air; the frame that passes
