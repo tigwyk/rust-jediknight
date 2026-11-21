@@ -7956,3 +7956,60 @@ Oracles re-recorded, with their reasons:
 
 Open, pre-existing (the baseline fails the same way): the level-2 route and the 2/3/4/6 chain route
 gates fail their port oracles on position (level 2 tick 36: sector 22 against 29).
+
+## #110: AI moves through physics (spec #108)
+
+An AI actor now moves only the engine's way. `sithAI_SetMoveThing` (`0x4eac90`) stores the move
+position and movespeed and sets AI flag `0x1`; the world tick's per-thing slot runs `sithAI_Tick`
+(`0x4ea5e0`, `Runtime::sith_ai_tick`), whose move arm `sithAI_idk_msgarrived_target` (`0x4ea890`)
+adds `movespeed × maxthrust × dt` to the body's velocity toward the point. Physics then moves the
+body through its own sweep, drag and floor attach. The arm's branches are transliterated: the
+`0x1000`/`0x40000` early return, the walker's zeroed z, the flyer stop (`FindSectorInRadius`,
+`0x4e71b0`, into water), the attached walker's `sithAI_CanWalk` (`0x4eb4b0`, with `0x4eb640`) at
+`pos + vel × dt`, which zeroes the velocity and emits `0x400` on 0, and the arrival test at
+`moveSize` (velocity zeroed, flag `0x1` cleared, `arrived` sent, `0x800` emitted). The default
+movespeed is `sithAI_Create`'s 1.5 (`0x3fc00000`); `AISetMoveSpeed` clamps to 0..2, and the
+`AISetMovePos`/`AISetMoveFrame`/`AISetMoveThing` verbs (`0x500cd0`, `0x500da0`, `0x500e00`) pass
+the AI's own movespeed. The `returnhome` handler's `0x100` and `0x800` arms and `roam`
+(`0x50b830`) are ported; both order moves through `SetMoveThing`.
+
+Deleted, because each was a position-writing stand-in: the chase, strafe, route, flee and listen
+walks, `circlestrafe`'s ring, the remembered-spot walk, `settle_walked`, the per-tick overlap test
+for event 4 (the `(2,10)` contact raises it now), round 307's cylinder refusal, `walk_vel`, and the
+floor probes only they used (`resting_floor`, `prop_floor`, `in_search`, `heard_event`). The
+handlers whose moves are not ported keep no walk and are named on the ledger's AI remainder row:
+`follow` (`0x5093f0`), `listen` (`0x50a6f0`; its audibility constants, recorded here so they are
+not lost: `_DAT_005232c8` = 1.0 unit and `_DAT_005232a0` = 0.5, cos 60°), `circlestrafe`
+(`0x509890`), `withdraw`/`flee` (`0x50b150`, `0x50aeb0`).
+
+An `_humanactor` (maxthrust 0.8, surfdrag 3) settles at `a (1 − 3 dt) / 3` = 0.36 u/s at 30 Hz with
+`a` = 1.5 × 0.8; the unit test pins that value.
+
+A/B against #109 (`05b1872`), same session: the unit suite (461 after the stand-in tests were
+deleted) and `--ai`, `--things`, `--collide`, `--fall`, `--pickup`, `--hit`, `--attach`,
+`--walk all`, `--soak-all`, `--tour`, `--cog-check` pass. The trace gate is unchanged (2 drifts:
+`walk_cantina` 24 %, `walk6_spawn` 5 sectors), the encounter gate reads 0 drifts, and the level-2 and
+2/3/4/6 chain route outputs are identical to #109's.
+
+Oracles re-recorded, with their engine reason: the route gate runs with `--no-ai`, which in retail
+(`-devMode disableai`) skips only `sithUpdate`'s `sithAI_Process` call. `sithAI_Tick` is in the
+per-thing loop and still runs, so a scripted move (`01_initialry.cog`'s `AISetMovePos`) walks
+under `--no-ai`, where the old stand-in walk ran only inside `ai_tick`. Level 1's spawn changes:
+
+| tick | retail | #109 port | #110 port |
+|------|--------|-----------|-----------|
+| 36 | -10.25, -5.06, s349 | -10.24, -5.41, s339 | -10.24, -5.41, s339 |
+| 72 | -9.84, -4.75, s349 | -10.24, -5.38, s339 | -10.24, -5.24, s339 |
+| 108 | -9.76, -4.75, s349 | -10.24, -5.35, s339 | -10.25, -5.03, s349 |
+| 144 | -9.76, -4.75, s349 | -10.24, -5.29, s339 | -9.96, -4.89, s349 |
+
+The spawn wedge (#106) eases: the body reaches sector 349 by tick 108, where retail is there by
+tick 36. `level1-route-port.tsv` changes at ticks 72-144, and `level1-audio-port.tsv` and
+`level1-audio-schedule.tsv` follow it: the ambient volume reads 0.4/0.5 in sector 349, and the
+trooper shots in the first 3 s are 3 instead of 4 (ticks 66, 84, 154), with gains that move with the
+body. Later ticks are unchanged. The audio gate reads 1 drift and 0 failures.
+
+#106, port side: the Rodian (thing 207, `01_initialry.cog`) stands at
+`(-10.273, -5.225, -1.119)` at 1.2 s; the `d760bb1` build's stand-in walk had it at `(-10.295, -5.119, -1.100)`.
+Its scripted move starts near 1.0 s and the body accelerates from rest through the move arm. The
+retail positions of 207 and the cantina actors at route tick 0 are still the open question on #106.

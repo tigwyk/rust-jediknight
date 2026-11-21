@@ -2924,12 +2924,8 @@ same function returns the speed to `sithPuppet_UpdatePuppet`, which calls
 `rdPuppet_AdvanceTrack(speed × dt × const)` — a locomotion clip advances with **distance
 moved**, not with the clock, which is why a walk cycle does not slide.
 
-The port has no physics velocity: `ai_tick` moves an actor by writing its position, so
-`Runtime::walk_vel` records the velocity each actor walked at (`(next - from) / dt`), and
-`locomotion_state` applies the same axis-and-threshold rule to it. A renderer-side
-displacement was tried first and is wrong — the sim ticks and the render frames do not line
-up (a 0.33 u/s walk measured 3.6 u/s), and `Runtime::step` re-seats an actor that ends up inside
-a wall, a push the `--ai` gate reports at 6.7 units, which reads as a sprint sideways. A
+Since #110 an actor moves through its own physics velocity (`sithAI_Tick`'s move arm pushes
+`ThingState::vel`), and `locomotion_state` applies the same axis-and-threshold rule to it. A
 script's `PlayKey` still overrides the choice, and a dead actor plays `death` once and holds
 the last frame. A state change restarts the clip, which is `sithPuppet_PlayMode` clearing
 `animStartedMs`.
