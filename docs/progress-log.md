@@ -8168,3 +8168,11 @@ audio, encounter, trace and level-1 route gates read exactly main's numbers (1 r
 0 failures, 1 trace drift, 0 route failures) — no level 1-6 actor combines a `circlestrafe` class
 with a set move thing, and the level-2 and 2/3/4/6 chain failures match #114's records line for
 line. No oracle moves.
+
+## #118: disabled thing tick gate
+
+`sithThing_Update` (`0x4cc1e0`) counts down a thing's lifetime before testing thing flag
+`0x80000`. While the flag is set, it skips the timer, control, type, movement and puppet arms.
+The port now applies that gate to the player motion callback as well as the per-thing arms.
+The focused regression covers the lifetime countdown and expiry, re-enabling an actor, and
+suppression and resumption of player motion.
