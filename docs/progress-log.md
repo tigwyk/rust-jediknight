@@ -8068,3 +8068,64 @@ With the AI running from load (the route plan without `--no-ai`, `BK_ACTOR_TRACE
 moved after 40 frames and 207 is at -10.272, -5.229 (0.017 units, its scripted move starting). Only
 retail's own positions at that tick can say whether the spawn wedge's remaining 72 ticks come from
 an actor; that half stays on #106 for a user capture.
+
+## #114: four of the five AI movers
+
+The shared helpers first, in call order. `sithAI_sub_4EB300` (`0x4eb300`) is the reach test every
+mover asks: past the class's `sightdist` answers 1, a `0x2102` sweep (radius 0) toward the goal
+that hits anything answers 3, a clear line 0. Its cone arm is dead content — every caller in the
+executable passes `_DAT_00523064` = -1.0, so the orientation tests never run. `sithAI_sub_4EAF40`
+(`0x4eaf40`) refreshes, once per tick, what the actor watches: without a fire target the goal is
+its own move position judged by the reach test; with one, `sithAI_CheckSightThing` at fov -1.0
+(no cone), the `CanDetectSightThing` roll for a cloak-flagged pair, and the target's position as
+the last-known one. The view record is `Runtime::ai_view` (`ai + 0x8a..0x92`).
+
+The handlers, all ordering moves through `sithAI_SetMoveThing` only:
+
+- `follow` (`0x5093f0`): the scheduler arm holds the standoff ring (the engine's own
+  coordinate-past-the-standoff arithmetic at `0x5093f0:44-56`) or walks the last-known position at
+  2.0 under the per-instinct latch; events `0x200`/`0x400` share the ±45° sidestep, `0x800` the
+  ±90°-jittered look at 0.7 units.
+- `listen` (`0x50a6f0`): event 2 walks the sector's awareness ring newest-kind-first (2, 1, 0)
+  under the reach test, the `heardist` gate and the near/cone gates for an occluded source
+  (`_DAT_005232c8` = 1.0, `_DAT_005232a0` = 0.5); a passed `fltArg[0]` roll orders
+  `SetMoveThing(sound, 1.0)` and plays mode `0x4b` (`curious`); events 1 and 4 play `0x57`
+  (`surprise`) / `0x4b` and seed the word; the event's source thing is looked at, walked `fltArg[1]`
+  past at 2.5, and a 0.1 roll can take a type-2/10 source as the fire target with the word `0x232`.
+- `withdraw` (`0x50b150`): the alert bit and `ai + 0x70`; a visible target walks away (the view
+  direction negated, ±90° yaw jitter, ±90° pitch for a flyer) at 1.5, other events sidestep the
+  move direction ±90°; a target out of sight clears `0x200 | 0x800` and sets bit 4.
+- `flee` (`0x50aeb0`): the instinct's word is the flee-start clock; while the target lives and the
+  class's `fltArg[2]` (shipped 1.0 s) has not passed, events `0x100`/`0x800` walk away at 2.5 and
+  look there, other events sidestep; the scheduler pass keeps the books. The tail drops the
+  target, resets the mode and zeroes the clock.
+
+New state: `ai_view`, `ai_inst_word` (the per-instinct `+8` slot — the word the old ledger row
+waited for), and `ai_move_thing` (`ai + 0x214`, written by the `AISetMoveThing` verb). The
+`SetMoveThing` doc comments now carry the engine's own offsets (`ai + 0x68..0x6a` and `+0x6f`,
+not the `+0x1a0` guessed in #110).
+
+`circlestrafe` (`0x509890`) is **not** ported, deliberately: its body reads `ai + 0x228..0x238` (a
+stored strafe direction, range and a gate) and no function in `decomp/` writes those slots. The
+question for the user: which engine path fills them — without that the handler's first branch
+cannot be judged. The shipped `Flee` line (`1.5, 10000.0, 1.0`) was read from the install's
+`misc/ai/*.ai` to pin the argument order.
+
+Shortcut, named at the reach test: the port's face-coverage mask is 2D, so a sweep crossing a
+*vertical* wall's polygon is not pinned by a unit test; the floor-crossing case is.
+
+A/B against `e023b7c` (main, same session): the unit suite (470) and the eleven port checks pass;
+the encounter gate reads 0 drifts on both. The trace gate's `walk_cantina` leg **passes now**
+(was 0.61/2.59 units, 24 %): an actor that stood in the cantina walk's way now moves through its
+ported handler; `walk6_spawn` keeps its drift. The level-2 route gate reads 42 mismatches against
+main's 43; the 2/3/4/6 chains fail their port oracles exactly as on main, with one new one-shot
+each (a tusken's `00tuskenhowl02.wav` at tick 36 — a `listen` event arm's mode).
+
+Oracles re-recorded, with their engine reason: the awareness sweep (`0x4f2b60`) is an
+`sithEvent` task registered by `sithAIAwareness_Startup` (`0x4f29f0`, every 1000 ms), and
+`sithUpdate` runs `sithEvent_Process` **outside** the `-devMode disableai` gate — so retail's
+`--no-ai` still raises event 2 and `listen`'s event arms still act. The port's route now does the
+same: `level1-audio-port.tsv`, `level1-audio-schedule.tsv` (a fourth trooper shot inside 3.3 s and
+gains that move with the actors) and `level1-route-port.tsv` (ticks 216-252 move by 0.02-0.06 as
+an actor the body passes now shifts). The audio and route gates read 0 failures against the new
+oracles.

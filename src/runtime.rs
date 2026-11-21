@@ -1066,6 +1066,13 @@ fn pov_key_loops(flags: u32) -> bool {
     flags & 0x26 == 0
 }
 
+
+/// `rdVector_Rotate3` (`0x44a06e`) with a yaw-only PYR: the 2D rotation of the vector's x and y
+/// in the frame `forward_of_yaw` defines (`(0,1)` turned by `deg` lands on `(-sin, cos)`), z kept.
+fn rotate3_yaw(v: [f32; 3], deg: f32) -> [f32; 3] {
+    let (s, c) = deg.to_radians().sin_cos();
+    [v[0] * c - v[1] * s, v[0] * s + v[1] * c, v[2]]
+}
 /// One physics step's pose changes and events.
 ///
 /// `moved` and `turned` are the things whose transform changed. `turned` names a thing whose
@@ -1718,7 +1725,7 @@ pub struct Runtime {
     /// build does with it (see `ai_tick`).
     pub ai: BTreeMap<usize, crate::ai::Ai>,
     /// `AISetMovePos` / `AISetMoveFrame` / `AISetMoveThing` / `AISetLookPos`: the move position
-    /// (`ai + 0x1a0`, written by `sithAI_SetMoveThing`) and the spot a standing actor turns to face.
+    /// (`ai + 0x68..0x6a`, written by `sithAI_SetMoveThing`) and the spot a standing actor turns to face.
     /// `sithAI_Tick`'s move arm (`0x4ea890`) pushes the body's velocity toward `ai_move`.
     pub ai_move: BTreeMap<usize, [f32; 3]>,
     pub ai_look: BTreeMap<usize, [f32; 3]>,
@@ -1817,6 +1824,17 @@ pub struct Runtime {
     /// target it remembers is gone (`ai[0x70] == 0` clears the mode); `Some` for `hitandrun`'s break-off,
     /// whose own second argument is a duration.
     pub ai_withdraw: BTreeMap<usize, (usize, Option<f32>)>,
+    /// `sithAI_sub_4EAF40`'s view record (`ai + 0x8a..0x92`): the direction and distance to what
+    /// the actor watches (`ai + 0x85`, or its own move position), the last sight code, and the
+    /// tick it was refreshed. The last-known position itself stays in `ai_last_seen`.
+    pub ai_view: BTreeMap<usize, AiView>,
+    /// The per-instinct float slot at `instinct + 8` — the word the engine's handlers keep state
+    /// in: `follow`'s searching latch (1.0), `circlestrafe`'s direction (±1.0), `listen`'s
+    /// newest-heard time and `flee`'s flee-start clock.
+    pub ai_inst_word: BTreeMap<(usize, usize), f32>,
+    /// `AISetMoveThing`'s target thing (`ai + 0x214`, `0x500e00`): what the actor was ordered to
+    /// move to, as a thing rather than a position.
+    pub ai_move_thing: BTreeMap<usize, usize>,
     /// `hitandrun` (`0x50bb90`) accumulator, in **milliseconds of firing time**: the handler runs on
     /// its scheduler pass (every 1000 ms while the mode word has `0xc00`), adds 1000 per firing
     /// pass, resets to zero on a pass that did not fire, and breaks off when the first argument is
@@ -2766,6 +2784,9 @@ impl Runtime {
             ai_home_look: BTreeMap::new(),
             ai_flee_until: BTreeMap::new(),
             ai_withdraw: BTreeMap::new(),
+            ai_view: BTreeMap::new(),
+            ai_inst_word: BTreeMap::new(),
+            ai_move_thing: BTreeMap::new(),
             ai_hitrun: BTreeMap::new(),
             ai_randomturn: BTreeMap::new(),
             sector_awareness: BTreeMap::new(),
@@ -4474,7 +4495,7 @@ impl Runtime {
 
     /// `sithAI_SetMoveThing` (`0x4eac90`): unless the jump lockout (`ai + 0x28c`) is still in the
     /// future **and** the actor is already moving, store the speed argument as movespeed
-    /// (`ai + 0x1bc`), the move position (`ai + 0x1a0`), play sound mode 5 (`PlayModeFirst`,
+    /// (`ai + 0x6f`), the move position (`ai + 0x68..0x6a`), play sound mode 5 (`PlayModeFirst`,
     /// "moving") and set the moving flag `0x1`.
     fn ai_set_move_thing(&mut self, actor: usize, point: [f32; 3], speed: f32) {
         let flags = self.ai_flags.get(&actor).copied().unwrap_or(0);
@@ -4878,7 +4899,7 @@ impl Runtime {
     }
 
     /// `sithAI_idk_msgarrived_target` (`0x4ea890`): the move arm. It pushes the body's velocity
-    /// (`+0x1d4`) toward the move position (`ai + 0x1a0`) by `movespeed (ai + 0x1bc) × maxthrust
+    /// (`+0x1d4`) toward the move position (`ai + 0x68..0x6a`) by `movespeed (ai + 0x6f) × maxthrust
     /// (+0x148) × dt`; physics and `sithThing_UpdateMove` then carry the body.
     ///
     /// - Returns at once on AI flag `0x1000` or typeflag `0x40000`.
@@ -5040,7 +5061,7 @@ impl Runtime {
                 return acted_any;
             };
             let mut acted = false;
-            for instinct in &class.instincts {
+            for (slot, instinct) in class.instincts.iter().enumerate() {
                 if Self::instinct_registry(&instinct.name).2 & event == 0 {
                     continue;
                 }
@@ -5105,6 +5126,24 @@ impl Runtime {
                             self.ai_set_look_frame(actor, [pos[0] + look[0], pos[1] + look[1], pos[2] + look[2]]);
                         }
                         false
+                    }
+                    // `follow`'s event arms (`0x5093f0`): the shared `0x200`/`0x400` sidestep and
+                    // the `0x800` jittered look.
+                    ("follow", 0x200 | 0x400 | 0x800) => {
+                        self.sith_ai_cmd_follow_event(actor, slot, event)
+                    }
+                    // `listen` (`0x50a6f0`, mask `0x7`): events 1, 2 and 4.
+                    ("listen", 1 | 2 | 4) => {
+                        let ctx = self.ai_listen_ctx(actor);
+                        self.sith_ai_cmd_listen(actor, slot, instinct, event, source, &ctx)
+                    }
+                    // `withdraw` and `flee` carry the same mask `0xf05`; their event arms are the
+                    // walk branches of the same handlers.
+                    ("withdraw", 1 | 2 | 4 | 0x100 | 0x400 | 0x800 | 0x1000) => {
+                        self.sith_ai_cmd_withdraw(actor, slot, instinct, event)
+                    }
+                    ("flee", 1 | 2 | 4 | 0x100 | 0x400 | 0x800 | 0x1000) => {
+                        self.sith_ai_cmd_flee(actor, slot, instinct, event)
                     }
                     // primaryfire/turretfire/crouch also carry the 0x100 bit; their event arms are
                     // not ported (#91/#93).
@@ -5310,9 +5349,8 @@ impl Runtime {
             // fires the lobbed shot itself.
             "lobfire" => self.sith_ai_cmd_lobfire(index, slot, instinct, player, ctx),
             // `retreat` (`0x50bc60`, accept 2 reject 0x800): when health falls under
-            // `fltArg[0] x max` and a `fltArg[1]` roll passes, set the alert bit and remember the
-            // player in the target slot (the port's `ai_withdraw` walk stands in for the
-            // `withdraw` handler's move).
+            // `fltArg[0] x max` and a `fltArg[1]` roll passes, set the alert bit and hand the
+            // player to `withdraw`'s target slot.
             "retreat" => {
                 if self.ai_withdraw.contains_key(&index) {
                     return false;
@@ -5336,6 +5374,14 @@ impl Runtime {
                 }
                 false
             }
+            // `follow` (`0x5093f0`, accept 2 reject 0x800): the scheduler's event-0 arm — the
+            // standoff ring around the fire target. Its event arms live in `emit_ai_event_from`.
+            "follow" => self.sith_ai_cmd_follow(index, slot, instinct, ctx.eye),
+            // `withdraw` (`0x50b150`, accept 0x800): walk away from the remembered target.
+            "withdraw" => self.sith_ai_cmd_withdraw(index, slot, instinct, 0),
+            // `flee` (`0x50aeb0`, accept 0x800): the event-0 pass keeps the flee clock and the
+            // mode; its walk is event-driven.
+            "flee" => self.sith_ai_cmd_flee(index, slot, instinct, 0),
             _ => false,
         }
     }
@@ -5459,6 +5505,520 @@ impl Runtime {
             return true;
         }
         false
+    }
+
+    /// The eye `sithAI_sub_4EAD60` raises above the body: one template radius plus the engine's
+    /// 0.01 bias — the same point `ai_tick`'s sight preamble casts from.
+    fn ai_eye(&self, index: usize) -> [f32; 3] {
+        let Some(t) = self.things.get(index) else { return [0.0; 3] };
+        let radius = self
+            .templates
+            .get(index)
+            .and_then(|name| self.template_hit.get(&name.to_ascii_lowercase()))
+            .map(|(radius, _)| *radius)
+            .unwrap_or(0.065);
+        [t.pos[0], t.pos[1], t.pos[2] + radius + 0.01]
+    }
+
+    /// `sithAI_sub_4EB300` (`0x4eb300`): can the body reach `goal` from `from`? Answers the
+    /// engine's code with the direction and distance it reports: past `maxsightdist` is 1; a
+    /// `0x2102` sweep (radius 0) from `mover` toward the goal that hits anything is 3; a clear
+    /// line is 0.
+    ///
+    /// shortcut: the cone arm (`param_4 > -1.0`, code 2) is dead content — every caller in the
+    /// executable passes `_DAT_00523064` = -1.0, so the orientation tests never run.
+    fn sith_ai_sub_4eb300(
+        &self,
+        mover: usize,
+        from: [f32; 3],
+        goal: [f32; 3],
+        maxsightdist: f32,
+    ) -> (u32, [f32; 3], f32) {
+        let mut dir = [goal[0] - from[0], goal[1] - from[1], goal[2] - from[2]];
+        let dist = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+        if dist > 0.0 {
+            dir = dir.map(|v| v / dist);
+        }
+        if maxsightdist < dist {
+            return (1, dir, dist);
+        }
+        let Some(solids) = self.solids.as_deref() else {
+            return (0, dir, dist);
+        };
+        let Some(sector) = self
+            .things
+            .get(mover)
+            .and_then(|t| usize::try_from(t.sector).ok())
+            .filter(|s| *s < solids.sectors.len())
+        else {
+            return (0, dir, dist);
+        };
+        let mut search = crate::collide::CollisionSearch::new();
+        search.exclude_thing(mover);
+        solids.search_for_collisions(
+            sector, None, from, dir, dist, 0.0, self.gates(), 0x2102, &mut search,
+        );
+        if search.pop().is_some() {
+            return (3, dir, dist);
+        }
+        (0, dir, dist)
+    }
+
+    /// `sithAI_sub_4EAF40` (`0x4eaf40`): refresh, once per tick, what the actor watches. No fire
+    /// target (`ai + 0x85`): the goal is its own move position, judged by
+    /// [`Self::sith_ai_sub_4eb300`]. With one: `sithAI_CheckSightThing` from the eye, and — when
+    /// the target or the watcher carries the cloak-ish typeflags (`0x80`/`0x800`) — the
+    /// `CanDetectSightThing` roll decides; a visible target's position becomes the last-known one.
+    /// The engine stamps `ai + 0x89` with the render frame; the port stamps the tick.
+    fn sith_ai_sub_4eaf40(&mut self, index: usize, eye: [f32; 3]) {
+        if self.ai_view.get(&index).is_some_and(|view| view.at == self.time) {
+            return;
+        }
+        let Some(class) = self.ai.get(&index).cloned() else { return };
+        let Some(pos) = self.things.get(index).map(|t| t.pos) else { return };
+        let target = self.ai_fire_target.get(&index).copied();
+        match target {
+            None => {
+                let goal = self.ai_move.get(&index).copied().unwrap_or(pos);
+                let (code, dir, dist) = self.sith_ai_sub_4eb300(index, pos, goal, class.sightdist);
+                self.ai_view.insert(index, AiView { dir, dist, sight: code, at: self.time });
+                if code == 0 {
+                    self.ai_last_seen.insert(index, goal);
+                    self.ai_last_seen_at.insert(index, self.time);
+                }
+            }
+            Some(target) => {
+                let Some(tpos) = self.things.get(target).map(|t| t.pos) else { return };
+                let mut preset = false;
+                for (who, bit) in [(target, 0x80), (index, 0x800)] {
+                    if let Some(name) = self.templates.get(who)
+                        && self
+                            .template_typeflags
+                            .get(&name.to_ascii_lowercase())
+                            .is_some_and(|flags| flags & bit != 0)
+                    {
+                        preset = true;
+                    }
+                }
+                let mut sight =
+                    // The engine passes `_DAT_00523064` = -1.0: no cone, range and line only.
+                    self.check_sight_thing(index, eye, target, -1.0, class.sightdist) as u32;
+                let mut dir = [tpos[0] - eye[0], tpos[1] - eye[1], tpos[2] - eye[2]];
+                let dist = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+                if dist > 0.0 {
+                    dir = dir.map(|v| v / dist);
+                }
+                if sight == 0 {
+                    if preset && !self.can_detect(index, target) {
+                        sight = 3;
+                    } else {
+                        self.ai_last_seen.insert(index, tpos);
+                        self.ai_last_seen_at.insert(index, self.time);
+                    }
+                }
+                self.ai_view.insert(index, AiView { dir, dist, sight, at: self.time });
+            }
+        }
+    }
+
+    /// `follow` (`0x5093f0`, the scheduler's event-0 arm): re-armed at `now + 1000` up front, the
+    /// view refreshed, then one branch per sight code. Codes 1 and 3 (out of range, no line) walk
+    /// the last-known position at speed 2.0 under the instinct's own latch
+    /// (`instinct + 8 = 1.0`); 0 and 2 hold a **standoff ring**: the point is the body's position
+    /// plus the view direction scaled by `standoff − <the body's coordinate past the standoff>`
+    /// (the engine reads its own x/y/z, taking y first, then x or z — z when the body's z is not
+    /// zero), the z from the target (a flyer aims 0.02 under it), and `SetMoveThing(point, 1.5)`
+    /// only when `fltArg[3]` is zero or the point passes the reach test at the target.
+    fn sith_ai_cmd_follow(
+        &mut self,
+        index: usize,
+        slot: usize,
+        instinct: &crate::ai::Instinct,
+        eye: [f32; 3],
+    ) -> bool {
+        let Some(target) = self.ai_fire_target.get(&index).copied() else { return false };
+        let Some(tpos) = self.things.get(target).map(|t| t.pos) else { return false };
+        self.ai_rearm(index, slot, self.time + 1.0);
+        self.sith_ai_sub_4eaf40(index, eye);
+        let view = self.ai_view.get(&index).copied().unwrap_or_default();
+        let word = self.ai_inst_word.entry((index, slot)).or_insert(0.0);
+        if view.sight != 0 && view.sight != 2 {
+            let target_typeflags = self
+                .templates
+                .get(target)
+                .and_then(|name| self.template_typeflags.get(&name.to_ascii_lowercase()))
+                .copied()
+                .unwrap_or(0);
+            if target_typeflags & 0x800 != 0 || *word != 0.0 {
+                return false;
+            }
+            *word = 1.0;
+            let last = self.ai_last_seen.get(&index).copied().unwrap_or(tpos);
+            self.ai_set_move_thing(index, last, 2.0);
+            self.ai_set_look_frame(index, last);
+            return false;
+        }
+        *word = 0.0;
+        self.ai_set_look_frame(index, tpos);
+        let (ax, ay, az) = self
+            .things
+            .get(index)
+            .map(|t| (t.pos[0], t.pos[1], t.pos[2]))
+            .unwrap_or((0.0, 0.0, 0.0));
+        let standoff = instinct.args.first().copied().unwrap_or(0.0) as f32;
+        let scale = if ay <= standoff {
+            if ax <= standoff {
+                return false;
+            }
+            if az == 0.0 { standoff - ax } else { standoff - az }
+        } else {
+            standoff - ay
+        };
+        let z = if self.things.get(index).is_some_and(|t| t.phys_flags & 0x2000 != 0) {
+            tpos[2] - 0.02 // -_DAT_00523298
+        } else if self.things.get(target).is_some_and(|t| t.flags & 0x2000000 != 0) {
+            tpos[2]
+        } else {
+            az
+        };
+        let point = [ax + view.dir[0] * scale, ay + view.dir[1] * scale, z];
+        let sightdist = self.ai.get(&index).map_or(20.0, |class| class.sightdist);
+        if instinct.args.get(2).copied().unwrap_or(0.0) == 0.0
+            && self.sith_ai_sub_4eb300(target, tpos, point, sightdist).0 != 0
+        {
+            return false;
+        }
+        self.ai_set_move_thing(index, point, 1.5);
+        false
+    }
+
+    /// `follow`'s event arms. `0x200` and `0x400` share the sidestep (`0x5093f0:90-116`): gated
+    /// on the moving bit `0x1` and the awake bit `0x200`, and on a roll (`rand != 0x200` — the
+    /// raw engine draw — or the body drifting along the view direction at under 0.03 u/s), the
+    /// current move direction turned ±45° and `SetMoveThing` at the goal's own distance and
+    /// speed, re-armed `now + 1000`, return 1. `0x800` (`0x5093f0:63-89`): awake with the
+    /// latch set, a ±90°-jittered look at 0.7 units out, `SetMoveThing(point, 2.0)` and look
+    /// there. Returns 0.
+    fn sith_ai_cmd_follow_event(&mut self, index: usize, slot: usize, event: u32) -> bool {
+        let flags = self.ai_flags.get(&index).copied().unwrap_or(0);
+        let Some(pos) = self.things.get(index).map(|t| t.pos) else { return false };
+        let move_dir = |rt: &Self| {
+            let goal = rt.ai_move.get(&index).copied().unwrap_or(pos);
+            let mut dir = [goal[0] - pos[0], goal[1] - pos[1], goal[2] - pos[2]];
+            let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+            if len > 0.0 {
+                dir = dir.map(|v| v / len);
+            }
+            dir
+        };
+        match event {
+            0x200 | 0x400 => {
+                if flags & 0x1 == 0 || flags & 0x200 == 0 {
+                    return false;
+                }
+                let raw = (crate::cog::pseudo_random() * 32767.0) as i32;
+                let view = self.ai_view.get(&index).copied().unwrap_or_default();
+                let vel = self.things.get(index).map(|t| t.vel).unwrap_or([0.0; 3]);
+                let along = vel[0] * view.dir[0] + vel[1] * view.dir[1] + vel[2] * view.dir[2];
+                if raw != 0x200 && along > 0.03 {
+                    return false;
+                }
+                let yaw = if crate::cog::pseudo_random() <= 0.5 { -45.0 } else { 45.0 };
+                let dir = rotate3_yaw(move_dir(self), yaw);
+                let goal = self.ai_move.get(&index).copied().unwrap_or(pos);
+                let dist = ((goal[0] - pos[0]).powi(2) + (goal[1] - pos[1]).powi(2) + (goal[2] - pos[2]).powi(2)).sqrt();
+                let speed = self.ai_move_speed.get(&index).copied().unwrap_or(AI_MOVE_SPEED);
+                let point = [pos[0] + dir[0] * dist, pos[1] + dir[1] * dist, pos[2] + dir[2] * dist];
+                self.ai_set_move_thing(index, point, speed);
+                self.ai_rearm(index, slot, self.time + 1.0);
+                true
+            }
+            0x800 => {
+                if flags & 0x200 == 0
+                    || self.ai_inst_word.get(&(index, slot)).copied().unwrap_or(0.0) == 0.0
+                {
+                    return false;
+                }
+                let yaw = (crate::cog::pseudo_random() as f32 - 0.5) * 90.0;
+                let eye = self.ai_eye(index);
+                let look = self.ai_look.get(&index).copied().unwrap_or(pos);
+                let base = if crate::cog::pseudo_random() >= 0.5 {
+                    self.sith_ai_sub_4eaf40(index, eye);
+                    self.ai_view.get(&index).copied().unwrap_or_default().dir
+                } else {
+                    [look[0] - pos[0], look[1] - pos[1], 0.0]
+                };
+                let dir = rotate3_yaw(base, yaw);
+                let point = [pos[0] + dir[0] * 0.7, pos[1] + dir[1] * 0.7, pos[2] + dir[2] * 0.7];
+                self.ai_set_look_frame(index, point);
+                self.ai_set_move_thing(index, point, 2.0);
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// `withdraw` (`0x50b150`, scheduler arm on the alert bit `0x800`): no remembered target
+    /// clears the mode; re-armed at the class's own interval (5000 ms when its first number is
+    /// 0). The target visible (`sithAI_CheckSightThing` == 0) walks **away**: the view direction
+    /// negated, jittered ±90° in yaw (`_DAT_005232d4` = 180 scaled by `rand − 0.5`, so ±90) and
+    /// ±90° in pitch for a flyer, `fltArg[1]` out, speed 1.5. On an event other than 0/0x100/
+    /// 0x800 the walk is a ±90° sidestep of the current move direction instead. The target out
+    /// of sight clears `0x200 | 0x800`, sets the idle-awake bit 4 and returns 1.
+    fn sith_ai_cmd_withdraw(
+        &mut self,
+        index: usize,
+        slot: usize,
+        instinct: &crate::ai::Instinct,
+        event: u32,
+    ) -> bool {
+        let flags = self.ai_flags.get(&index).copied().unwrap_or(0);
+        if flags & 0x800 == 0 {
+            return false;
+        }
+        let Some(&target) = self.ai_withdraw.get(&index).map(|(target, _)| target) else {
+            self.ai_flags.insert(index, flags & !0x800);
+            return false;
+        };
+        let interval = if instinct.weight > 0.0 { instinct.weight / 1000.0 } else { 5.0 };
+        self.ai_rearm(index, slot, self.time + interval);
+        let Some(class) = self.ai.get(&index).cloned() else { return false };
+        let Some(pos) = self.things.get(index).map(|t| t.pos) else { return false };
+        let Some(tpos) = self.things.get(target).map(|t| t.pos) else { return false };
+        let eye = self.ai_eye(index);
+        let sight = self.check_sight_thing(index, eye, target, -1.0, class.sightdist);
+        if sight != 0 {
+            self.ai_flags.insert(index, (flags & !0xA00) | 0x4);
+            return true;
+        }
+        let mut dir = [pos[0] - tpos[0], pos[1] - tpos[1], pos[2] - tpos[2]];
+        let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+        if len > 0.0 {
+            dir = dir.map(|v| v / len);
+        }
+        let distance = instinct.args.first().copied().unwrap_or(1.0) as f32;
+        let dir = if event == 0 || event == 0x100 || event == 0x800 {
+            let mut yaw = (crate::cog::pseudo_random() as f32 - 0.5) * 180.0;
+            if self.things.get(index).is_some_and(|t| t.phys_flags & 0x2000 != 0) {
+                yaw = (crate::cog::pseudo_random() as f32 - 0.5) * 90.0;
+            }
+            rotate3_yaw(dir, yaw)
+        } else {
+            let yaw = if crate::cog::pseudo_random() <= 0.5 { -90.0 } else { 90.0 };
+            let goal = self.ai_move.get(&index).copied().unwrap_or(pos);
+            let mut move_dir = [goal[0] - pos[0], goal[1] - pos[1], goal[2] - pos[2]];
+            let move_len = (move_dir[0] * move_dir[0] + move_dir[1] * move_dir[1] + move_dir[2] * move_dir[2]).sqrt();
+            if move_len > 0.0 {
+                move_dir = move_dir.map(|v| v / move_len);
+            }
+            rotate3_yaw(move_dir, yaw)
+        };
+        let point = [pos[0] + dir[0] * distance, pos[1] + dir[1] * distance, pos[2] + dir[2] * distance];
+        self.ai_set_move_thing(index, point, 1.5);
+        false
+    }
+
+    /// `flee` (`0x50aeb0`, scheduler and event arms on the alert bit `0x800`): the instinct's own
+    /// word (`instinct + 8`) is the flee-start clock — zero entering, stamped on the first pass.
+    /// While the remembered target lives and `start + fltArg[2]` (10 s when zero) has not
+    /// passed, the searching bit is cleared and the pass re-arms at the class's own interval; the
+    /// target **visible** walks only on an event — 0x100/0x800 away from the target
+    /// (view direction negated, ±90° yaw jitter, ±90° pitch for a flyer) at speed 2.5 and looks
+    /// there, any other event a ±90° sidestep of the move direction; the scheduler's event 0
+    /// only keeps the books. The target gone, the timer out or the target out of sight: look at
+    /// the target one last time, drop it, clear `0x200 | 0x800`, set bit 4, zero the clock,
+    /// return 1.
+    fn sith_ai_cmd_flee(
+        &mut self,
+        index: usize,
+        slot: usize,
+        instinct: &crate::ai::Instinct,
+        event: u32,
+    ) -> bool {
+        let flags = self.ai_flags.get(&index).copied().unwrap_or(0);
+        if flags & 0x800 == 0 {
+            return false;
+        }
+        let start = self.ai_inst_word.entry((index, slot)).or_insert(0.0);
+        if *start == 0.0 {
+            *start = self.time;
+        }
+        // `fltArg[2]` against the engine's seconds clock (shipped `Flee 1.5, 10000.0, 1.0`: a
+        // 1.5-unit flee for 1.0 s); `_DAT_005232ec` = 10.0 when the class leaves it zero.
+        let duration = if instinct.args.get(1).copied().unwrap_or(0.0) > 0.0 {
+            instinct.args[1]
+        } else {
+            10.0
+        };
+        let target = self.ai_withdraw.get(&index).map(|(target, _)| *target);
+        if target.is_some_and(|target| self.things.get(target).is_some())
+            && self.time <= *start + duration
+        {
+            self.ai_flags.insert(index, flags & !0x2);
+            // `intArg[1]`, which no shipped `Flee` line fills: the engine's own 5000 ms.
+            self.ai_rearm(index, slot, self.time + 5.0);
+            let target = target.expect("checked");
+            let tpos = self.things.get(target).map(|t| t.pos).expect("checked");
+            let Some(class) = self.ai.get(&index).cloned() else { return false };
+            let Some(pos) = self.things.get(index).map(|t| t.pos) else { return false };
+            let eye = self.ai_eye(index);
+            let sight = self.check_sight_thing(index, eye, target, -1.0, class.sightdist);
+            if sight == 0 {
+                if event == 0 {
+                    return false;
+                }
+                let distance = instinct.weight as f32;
+                let (dir, look) = if event == 0x100 || event == 0x800 {
+                    let away = [pos[0] - tpos[0], pos[1] - tpos[1], pos[2] - tpos[2]];
+                    let len = (away[0] * away[0] + away[1] * away[1] + away[2] * away[2]).sqrt();
+                    let away = if len > 0.0 { away.map(|v| v / len) } else { away };
+                    let yaw = (crate::cog::pseudo_random() as f32 - 0.5) * 180.0;
+                    (rotate3_yaw(away, yaw), true)
+                } else {
+                    let yaw = if crate::cog::pseudo_random() <= 0.5 { -90.0 } else { 90.0 };
+                    let goal = self.ai_move.get(&index).copied().unwrap_or(pos);
+                    let mut move_dir = [goal[0] - pos[0], goal[1] - pos[1], goal[2] - pos[2]];
+                    let len = (move_dir[0] * move_dir[0] + move_dir[1] * move_dir[1] + move_dir[2] * move_dir[2]).sqrt();
+                    if len > 0.0 {
+                        move_dir = move_dir.map(|v| v / len);
+                    }
+                    (rotate3_yaw(move_dir, yaw), false)
+                };
+                let point = [pos[0] + dir[0] * distance, pos[1] + dir[1] * distance, pos[2] + dir[2] * distance];
+                self.ai_set_move_thing(index, point, 2.5);
+                if look {
+                    self.ai_set_look_frame(index, point);
+                }
+                return false;
+            }
+        }
+        if let Some(&target) = self.ai_withdraw.get(&index).map(|(target, _)| target)
+            && let Some(tpos) = self.things.get(target).map(|t| t.pos)
+        {
+            self.ai_set_look_frame(index, tpos);
+        }
+        self.ai_withdraw.remove(&index);
+        let flags = self.ai_flags.get(&index).copied().unwrap_or(0);
+        self.ai_flags.insert(index, (flags & !0xA00) | 0x4);
+        self.ai_inst_word.insert((index, slot), 0.0);
+        true
+    }
+
+    /// `listen` (`0x50a6f0`, events 1/2/4 — its registry mask `0x7`): awake only. Event 2 walks
+    /// the sector's awareness ring newest-kind-first (2, 1, 0): a record is heard when its time
+    /// is live, the reach test (`sithAI_sub_4EB300`) is 0 **or** the source is nearer than one
+    /// unit (`_DAT_005232c8`) and inside a 60° half-cone in front (`_DAT_005232a0` = 0.5), and it
+    /// is inside the class's `heardist`. The first heard record becomes the sound position; a
+    /// newer one than the instinct's word updates it, a `fltArg[0]` roll (with the moving bit
+    /// clear) orders `SetMoveThing(sound, 1.0)` and plays mode `0x4b`, and the look goes at the
+    /// record's source thing when it has one. Events 1 and 4 (`0x50a6f0:38-46`) only play their
+    /// mode (`0x57`/`0x4b`) and set the word to 0.1 when it is still zero. The common tail
+    /// (`param_5`, the event's source thing): look at it, `SetMovePos` `fltArg[1]` past it at
+    /// 2.5 when the class asks and the actor is not moving, and a 0.1 roll on a type-2/10 source
+    /// takes it as the fire target with the word `0x232`.
+    fn sith_ai_cmd_listen(
+        &mut self,
+        index: usize,
+        slot: usize,
+        instinct: &crate::ai::Instinct,
+        event: u32,
+        source: Option<usize>,
+        ctx: &AiCtx,
+    ) -> bool {
+        if self.ai_flags.get(&index).copied().unwrap_or(0) & 0x4 == 0 {
+            return false;
+        }
+        let mut heard: Option<([f32; 3], Option<usize>, f32)> = None;
+        match event {
+            1 | 4 => {
+                if self.ai_inst_word.get(&(index, slot)).copied().unwrap_or(0.0) == 0.0 {
+                    // The mode table at `0x54b408`: `0x57` surprise, `0x4b` curious.
+                    self.queue_mode_sound(index, if event == 1 { "surprise" } else { "curious" }, ctx.from);
+                    self.ai_inst_word.insert((index, slot), 0.1);
+                }
+            }
+            2 => {
+                let class = self.ai.get(&index).cloned();
+                let (heardist, sightdist) = class
+                    .map(|class| (class.heardist, class.sightdist))
+                    .unwrap_or((10.0, 20.0));
+                let yaw = ctx.yaw.to_radians();
+                let forward = [-yaw.sin(), yaw.cos()];
+                for kind in [2u8, 1, 0] {
+                    let Some(&(_strength, pos, at, record_source)) =
+                        self.sector_awareness.get(&(ctx.sector, kind))
+                    else {
+                        continue;
+                    };
+                    if self.time - at >= AI_AWARE_SECONDS {
+                        continue; // The ring's slot is empty or stale.
+                    }
+                    let (code, dir, dist) = self.sith_ai_sub_4eb300(index, ctx.from, pos, sightdist);
+                    let dot = forward[0] * dir[0] + forward[1] * dir[1];
+                    if heardist < dist || (code != 0 && (1.0 <= dist || dot <= 0.5)) {
+                        continue;
+                    }
+                    heard = Some((pos, record_source, at));
+                    break;
+                }
+                if let Some((pos, record_source, at)) = heard {
+                    let word = self.ai_inst_word.entry((index, slot)).or_insert(0.0);
+                    if *word < at {
+                        *word = at;
+                    }
+                    let chance = instinct.weight as f64;
+                    if crate::cog::pseudo_random() < chance
+                        && self.ai_flags.get(&index).copied().unwrap_or(0) & 0x1 == 0
+                    {
+                        self.ai_set_move_thing(index, pos, 1.0);
+                        self.queue_mode_sound(index, "curious", ctx.from);
+                    }
+                    let look = record_source
+                        .and_then(|source| self.things.get(source).map(|t| t.pos))
+                        .unwrap_or(pos);
+                    self.ai_set_look_frame(index, look);
+                }
+            }
+            _ => {}
+        }
+        if let Some(source) = source && let Some(spos) = self.things.get(source).map(|t| t.pos) {
+            self.ai_set_look_frame(index, spos);
+            let reach = instinct.args.first().copied().unwrap_or(0.0) as f32;
+            if self.ai_flags.get(&index).copied().unwrap_or(0) & 0x1 == 0 && reach != 0.0 {
+                let mut dir = [spos[0] - ctx.from[0], spos[1] - ctx.from[1], spos[2] - ctx.from[2]];
+                let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+                if len > 0.0 {
+                    dir = dir.map(|v| v / len);
+                }
+                let point = [ctx.from[0] + dir[0] * reach, ctx.from[1] + dir[1] * reach, ctx.from[2] + dir[2] * reach];
+                self.ai_set_move_thing(index, point, 2.5);
+            }
+            if crate::cog::pseudo_random() < 0.1
+                && event == 1
+                && matches!(self.types.get(source).copied(), Some(2 | 10))
+            {
+                self.ai_fire_target.insert(index, source);
+                let flags = self.ai_flags.get(&index).copied().unwrap_or(0);
+                self.ai_flags.insert(index, (flags & !0x4) | 0x232);
+            }
+        }
+        false
+    }
+
+    /// The `AiCtx` the emit path builds for `listen` — the per-pass facts `ai_tick`'s preamble
+    /// computes, read straight off the actor.
+    fn ai_listen_ctx(&self, index: usize) -> AiCtx {
+        let from = self.things.get(index).map(|t| t.pos).unwrap_or([0.0; 3]);
+        AiCtx {
+            from,
+            yaw: self.things.get(index).map(|t| t.yaw).unwrap_or(0.0),
+            sector: self.things.get(index).map(|t| t.sector).unwrap_or(-1),
+            eye: self.ai_eye(index),
+            target: self.ai_last_seen.get(&index).copied().unwrap_or(from),
+            sighted: false,
+            health: self.things.get(index).map(|t| t.health).unwrap_or(0.0),
+            template: self.templates.get(index).cloned().unwrap_or_default(),
+        }
     }
 
     /// `sithAICmd_HitAndRun` (`0x50bb90`, accept `0xc00`): the attack-then-withdraw state machine,
@@ -11429,11 +11989,13 @@ impl Runtime {
                 }
                 Value::Nil
             }
-            // `AISetMoveThing` (`0x500e00`): `sithAI_SetMoveThing` to the thing's position **now**
-            // (it is not re-read). shortcut: the engine also makes the thing the AI's target
-            // (`ai + 0x214`), which the port's player-only target does not model.
+            // `AISetMoveThing` (`0x500e00`): the thing becomes the AI's target (`ai + 0x214`) and
+            // `sithAI_SetMoveThing` moves to its position **now** (it is not re-read).
             "aisetmovething" => {
                 let (actor, destination) = (ti(0), ti(1));
+                if self.ai.contains_key(&(actor as usize)) {
+                    self.ai_move_thing.insert(actor as usize, destination as usize);
+                }
                 if let Some(at) = self.things.get(destination).map(|t| t.pos) {
                     self.ai_set_move_thing_cog(actor, at);
                 }
@@ -12777,6 +13339,20 @@ fn closest_segment_parameters(p0: [f32; 3], p1: [f32; 3], q0: [f32; 3], q1: [f32
     }
     (s, t)
 }
+
+/// `sithAI_sub_4EAF40`'s view record (`ai + 0x8a..0x92`): the direction and distance to what the
+/// actor watches, the last sight code, and the tick it was refreshed. The last-known position
+/// itself is `Runtime::ai_last_seen`.
+#[derive(Clone, Copy, Default)]
+pub struct AiView {
+    pub dir: [f32; 3],
+    /// The distance the engine reports through `4EB300`'s/`CheckSightThing`'s out-parameter
+    /// (`ai + 0x8d`); kept for the reader — no ported handler reads it yet.
+    #[allow(dead_code)]
+    pub dist: f32,
+    pub sight: u32,
+    pub at: f32,
+}
 /// The per-pass facts the scheduler's handlers share with the frame's motion half: computed once
 /// per actor per tick, before the instinct pass (`sithAI_Process` runs decisions before
 /// `sithAI_Tick` moves the body).
@@ -13340,6 +13916,7 @@ mod tests {
             .and_then(|slot| rt.ai_inst.get(&index).and_then(|v| v.get(slot).copied()))
             .unwrap_or(f32::NAN)
     }
+
 
     fn door_runtime() -> Runtime {
         let mut rt = Runtime::new(&Level::default());
@@ -18876,6 +19453,188 @@ mod tests {
         rt.things[1].phys_flags = 0;
         rt.sith_ai_msgarrived_target(1, 0.1, None);
         assert_eq!(rt.things[1].vel[2], 0.0, "a walker kept a z push: {:?}", rt.things[1].vel);
+    }
+
+    /// `sithAI_sub_4EB300` (`0x4eb300`): a goal past `maxsightdist` answers 1, a goal the
+    /// `0x2102` sweep cannot reach answers 3, a clear line answers 0.
+    #[test]
+    fn the_reach_test_answers_one_past_range_and_three_behind_a_wall() {
+        let solids = crate::collide::test_room();
+        let mut rt = door_runtime();
+        let mut actor = rt.things[0].clone();
+        actor.pos = [-1.0, 0.0, -0.93];
+        actor.sector = 0;
+        rt.things = vec![rt.things[0].clone(), actor];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.solids = Some(std::sync::Arc::new(solids));
+        let (code, dir, dist) = rt.sith_ai_sub_4eb300(1, [-1.0, 0.0, -0.93], [1.0, 0.0, -0.93], 10.0);
+        assert_eq!(code, 0, "a clear line across the room was refused");
+        assert!((dist - 2.0).abs() < 1e-4 && dir[0] > 0.99, "the direction and distance: {dir:?} {dist}");
+        assert_eq!(rt.sith_ai_sub_4eb300(1, [-1.0, 0.0, -0.93], [1.0, 0.0, -0.93], 1.5).0, 1, "past maxsightdist");
+        // Down through the floor: the `0x2102` sweep hits the floor face. shortcut: a *vertical*
+        // wall's polygon coverage is the port's 2D mask, so a wall crossing is not pinned here.
+        assert_eq!(
+            rt.sith_ai_sub_4eb300(1, [0.0, 0.0, -0.5], [0.0, 0.0, -2.0], 10.0).0,
+            3,
+            "a goal through the floor"
+        );
+    }
+
+    /// `follow` (`0x5093f0`), the scheduler arm: a **visible** target (sight 0) holds the
+    /// standoff ring — the point sits `standoff − x` along the view direction behind the body,
+    /// the look goes at the target — and a **lost** one (sight 1, out of range) walks the
+    /// last-known position at speed 2.0 under the latch.
+    #[test]
+    fn follow_holds_the_standoff_and_walks_the_last_known_position() {
+        let follower = |target_at: [f32; 3]| {
+            let mut rt = door_runtime();
+            let mut actor = rt.things[0].clone();
+            actor.pos = [2.0, 0.0, 0.0];
+            let mut player = rt.things[0].clone();
+            player.pos = target_at;
+            rt.things = vec![player, actor];
+            rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+            rt.types = vec![10, 2];
+            rt.ai.insert(
+                1,
+                crate::ai::parse("alignment=-1.0, rank=0.5, sightdist=10.0\n\nFollow 0.5, 0.75\n"),
+            );
+            rt.ai_flags.insert(1, 0x2); // `follow`'s accept word
+            rt.ai_fire_target.insert(1, 0);
+            rt
+        };
+        let mut rt = follower([0.0, 0.0, 0.0]);
+        rt.ai_tick(0, 1.0 / 30.0);
+        let point = rt.ai_move.get(&1).copied().expect("follow ordered no move");
+        // The view direction is toward the target (-1, 0, 0) and the scale is 0.75 - 2 = -1.25,
+        // so the point lands 1.25 **behind** the body: the standoff ring, not the target.
+        assert!((point[0] - 3.25).abs() < 1e-3 && point[1].abs() < 1e-3, "standoff point: {point:?}");
+        assert_eq!(rt.ai_move_speed.get(&1), Some(&1.5));
+        let look = rt.ai_look_dir.get(&1).copied();
+        assert_eq!(look, Some([-1.0, 0.0]), "the look did not go at the target: {look:?}");
+
+        // Out of the class's sight range: the last-known position, at speed 2.0, latch set.
+        let mut lost = follower([-9.0, 0.0, 0.0]);
+        lost.ai.insert(
+            1,
+            crate::ai::parse("alignment=-1.0, rank=0.5, sightdist=2.0\n\nFollow 0.5, 0.75\n"),
+        );
+        lost.ai_last_seen.insert(1, [-5.0, 0.0, 0.0]);
+        lost.ai_tick(0, 1.0 / 30.0);
+        assert_eq!(lost.ai_move.get(&1), Some(&[-5.0, 0.0, 0.0]), "not the last-known position");
+        assert_eq!(lost.ai_move_speed.get(&1), Some(&2.0));
+        assert_eq!(lost.ai_inst_word.get(&(1, 0)), Some(&1.0), "the latch did not set");
+    }
+
+    /// `listen` (`0x50a6f0`), event 2: the newest kind-2 record inside `heardist` and reach
+    /// orders `SetMoveThing(sound, 1.0)` on a passed chance roll and looks at the sound; a
+    /// zero-chance class only looks.
+    #[test]
+    fn listen_walks_to_a_heard_sound_on_a_passed_roll() {
+        let listener = |chance: &str| {
+            let mut rt = door_runtime();
+            let mut actor = rt.things[0].clone();
+            actor.pos = [0.0, 0.0, 0.0];
+            actor.sector = 7;
+            let mut player = rt.things[0].clone();
+            player.pos = [-9.0, 0.0, 0.0];
+            rt.things = vec![player, actor];
+            rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+            rt.types = vec![10, 2];
+            rt.ai.insert(
+                1,
+                crate::ai::parse(&format!(
+                    "alignment=-1.0, rank=0.5, sightdist=2.0, heardist=4.0\n\nListen {chance}, 3.0\n"
+                )),
+            );
+            rt.ai_flags.insert(1, 0x4); // awake
+            rt
+        };
+        let mut rt = listener("1.00");
+        rt.sector_awareness.insert((7, 2), (4.0, [1.5, 0.0, 0.0], rt.time, None));
+        rt.emit_ai_event(1, 2, None); // `listen` returns 0 in the engine; the state is the proof
+        assert_eq!(rt.ai_move.get(&1), Some(&[1.5, 0.0, 0.0]), "the roll did not order the walk");
+        assert_eq!(rt.ai_move_speed.get(&1), Some(&1.0));
+        assert_eq!(rt.ai_look_dir.get(&1), Some(&[1.0, 0.0]), "the look did not go at the sound");
+
+        let mut deaf = listener("0.00");
+        deaf.sector_awareness.insert((7, 2), (4.0, [1.5, 0.0, 0.0], deaf.time, None));
+        deaf.emit_ai_event(1, 2, None);
+        assert!(deaf.ai_move.get(&1).is_none(), "a zero-chance class walked at a sound");
+        assert_eq!(deaf.ai_look_dir.get(&1), Some(&[1.0, 0.0]), "a failed roll did not turn at the sound");
+    }
+
+    /// `withdraw` (`0x50b150`): the alert bit and a live target walk the body away — the view
+    /// direction negated, jittered under ±90°, `fltArg[1]` out at speed 1.5 — and a target out
+    /// of the class's sight range ends the mode (`0x200 | 0x800` clear, bit 4 set, return 1).
+    #[test]
+    fn withdraw_walks_away_and_ends_on_a_lost_target() {
+        let mut rt = door_runtime();
+        let mut actor = rt.things[0].clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        let mut player = rt.things[0].clone();
+        player.pos = [3.0, 0.0, 0.0];
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.ai.insert(
+            1,
+            crate::ai::parse("alignment=-1.0, rank=0.5, sightdist=10.0\n\nWithdraw 5000.0, 1.0\n"),
+        );
+        rt.ai_flags.insert(1, 0x800 | 0x200);
+        rt.ai_withdraw.insert(1, (0, None));
+        rt.ai_tick(0, 1.0 / 30.0);
+        let point = rt.ai_move.get(&1).copied().expect("withdraw ordered no move");
+        let reach = (point[0] * point[0] + point[1] * point[1]).sqrt();
+        assert!((reach - 1.0).abs() < 1e-3, "the walk is not fltArg[1] out: {point:?}");
+        assert!(point[0] < 0.0, "the walk turned toward the target: {point:?}");
+        assert_eq!(rt.ai_move_speed.get(&1), Some(&1.5));
+
+        // The player steps out of sight: the mode ends, the awake bit 4 replaces it.
+        rt.things[0].pos = [-90.0, 0.0, 0.0];
+        rt.ai_inst.insert(1, vec![0.0]);
+        rt.ai_next_due.remove(&1);
+        // `ai_tick` reports shots fired, not handler actions; the mode word is the proof.
+        rt.ai_tick(0, 1.0 / 30.0);
+        assert_eq!(rt.ai_flags.get(&1), Some(&(0x4 | 0x1)), "the mode word did not reset to awake");
+    }
+
+    /// `flee` (`0x50aeb0`): event `0x100` with the target visible walks away at speed 2.5 and
+    /// looks there; the class's own duration (shipped 1.0 s) ends the mode — the target is
+    /// dropped, `0x200 | 0x800` clear, bit 4 set, the instinct's clock zeroed.
+    #[test]
+    fn flee_walks_on_its_events_and_expires_on_its_duration() {
+        let mut rt = door_runtime();
+        let mut actor = rt.things[0].clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        let mut player = rt.things[0].clone();
+        player.pos = [3.0, 0.0, 0.0];
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.ai.insert(
+            1,
+            crate::ai::parse("alignment=-1.0, rank=0.5, sightdist=10.0\n\nFlee 1.5, 10000.0, 1.0\n"),
+        );
+        rt.ai_flags.insert(1, 0x800 | 0x200 | 0x2);
+        rt.ai_withdraw.insert(1, (0, None));
+        rt.time = 1.0; // a nonzero clock, so the flee-start stamp is not the "no clock" zero
+        rt.emit_ai_event(1, 0x100, None);
+        let point = rt.ai_move.get(&1).copied().expect("flee ordered no move");
+        assert!(point[0] < 0.0, "the flee turned toward the target: {point:?}");
+        assert_eq!(rt.ai_move_speed.get(&1), Some(&2.5));
+        assert!(rt.ai_look_dir.get(&1).is_some(), "flee did not look where it runs");
+
+        // Past the class's 1.0 s: the mode ends on the next pass.
+        rt.time += 2.0;
+        rt.ai_inst.insert(1, vec![0.0]);
+        rt.ai_next_due.remove(&1);
+        rt.ai_tick(0, 1.0 / 30.0);
+        assert!(!rt.ai_withdraw.contains_key(&1), "the target was not dropped");
+        let word = rt.ai_flags.get(&1).copied().unwrap_or(0);
+        assert!(word & 0xA00 == 0 && word & 0x4 != 0, "the mode word did not reset to awake: {word:#x}");
+        assert_eq!(rt.ai_inst_word.get(&(1, 0)), Some(&0.0), "the flee clock was not zeroed");
     }
 
     /// A door-runtime pair for the per-thing arms: thing 0 the player, thing 1 an actor of
