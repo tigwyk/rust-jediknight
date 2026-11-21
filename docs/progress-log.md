@@ -8129,3 +8129,42 @@ same: `level1-audio-port.tsv`, `level1-audio-schedule.tsv` (a fourth trooper sho
 gains that move with the actors) and `level1-route-port.tsv` (ticks 216-252 move by 0.02-0.06 as
 an actor the body passes now shifts). The audio and route gates read 0 failures against the new
 oracles.
+
+## #116: circlestrafe, and the 0x228 question answered
+
+The #114 open question — *which engine path fills `ai + 0x228..0x238`?* — was a false alarm, and
+answering it needed the shipped image rather than the decompiled text. Ghidra (REA, JK.EXE
+`12e8c8c3…`) disassembly of the view refresh `0x4eaf40` shows its stores directly:
+`MOV [ESI+0x224]`, `LEA ESI,[ESI+0x228]` (the direction out-param), `MOV [ESI+0x238]`,
+`MOV [ESI+0x23c]`. The slots **are** the view block — the decompile writes them as word indices
+(`param_1[0x8a]` = byte `0x228`), and the #114 search that found "no writer" compared byte offsets
+against those word indices. No user input was required.
+
+The same disassembly pinned the handler's geometry where the decompiled stack names could not:
+the orbit vector sits at `[esp+0x1c/0x20/0x24]` as (x, y, z), the facing gate is the plain dot of
+the look row (`thing + 0x94..0x9c`, `rdMatrix_BuildRotate34`'s second row) with it, and
+`rdVector_Rotate3(v, {0, side, 0})` is an **Euler yaw** by `side` degrees — `BuildRotate34` takes
+a pitch/yaw/roll triple, not an axis-angle — which is the port's own `rotate3_yaw` to the sign.
+
+`sithAIClass_LoadEntry` (`0x4f15c0`) fixed the argument mapping: handler param 2 is the class
+record at `+0x2c`, so `fltArg[k] = param_2 + 0xc + 4k` and `intArg[k] = param_2 + 0x4c + 4k` —
+`circlestrafe` reads `fltArg[1]` (the angle), `fltArg[2]` (the range gate), `intArg[0]` (the head
+re-arm), `intArg[3]` (the walk re-arm) and `intArg[4]` (the jittered-side mode the saber bosses'
+lines set). The class-line numbers came from the install corrected the same way: the GOB entry
+stride is 136 from offset 16 with the count at 12, and with that fixed **24 shipped classes**
+carry the line (`jerec.ai` `3000.0, 30.0, 1.0, 200.0, 0.0`, `bldefault.ai`
+`5000.0, 45.0, 1.5, 1000.0, 1.0`, `maw.ai`, `pic.ai`, the `ic*` family) — the port's round-222
+notebook numbers (`5000, 30, 0.6, 500, 0`, "70 classes") were read with the same broken stride.
+
+`Runtime::sith_ai_cmd_circlestrafe` (`0x509890`): re-arm at `now + intArg[0]`; the move thing
+(`ai + 0x214`) gates everything; the view refresh's `fltArg[2] >= dist` and sight 0; the arm
+`view.dir × -dist` kept when `intArg[4]` is set or it lies on the target's facing side; the ±1
+side rolled once and flipped when the reach test (`0x4eb300`, at the target, the class's
+`sightdist`) blocks; the walk at 0.5 with the look at the target and the `intArg[3]` re-arm.
+
+Verification: 471 unit tests (one new, `circlestrafe_orbits_the_move_target` — the ±30° ring
+point at speed 0.5, and the out-of-range gate ordering nothing); the eleven port checks pass; the
+audio, encounter, trace and level-1 route gates read exactly main's numbers (1 retail audio drift,
+0 failures, 1 trace drift, 0 route failures) — no level 1-6 actor combines a `circlestrafe` class
+with a set move thing, and the level-2 and 2/3/4/6 chain failures match #114's records line for
+line. No oracle moves.
