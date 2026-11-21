@@ -5382,6 +5382,11 @@ impl Runtime {
             // `flee` (`0x50aeb0`, accept 0x800): the event-0 pass keeps the flee clock and the
             // mode; its walk is event-driven.
             "flee" => self.sith_ai_cmd_flee(index, slot, instinct, 0),
+            // `circlestrafe` (`0x509890`, accept 2 reject 0x800): orbit the `AISetMoveThing`
+            // target. 24 shipped classes carry the line (the saber bosses — `jerec.ai`
+            // `3000.0, 30.0, 1.0, 200.0, 0.0`, `bldefault.ai` `..., 45.0, 1.5, 1000.0, 1.0`);
+            // it runs for them only once a cog or the fire chain sets the move thing.
+            "circlestrafe" => self.sith_ai_cmd_circlestrafe(index, slot, instinct),
             _ => false,
         }
     }
@@ -5902,6 +5907,70 @@ impl Runtime {
         self.ai_flags.insert(index, (flags & !0xA00) | 0x4);
         self.ai_inst_word.insert((index, slot), 0.0);
         true
+    }
+
+    /// `circlestrafe` (`0x509890`, accept 2 reject 0x800, mask 0 — the scheduler alone runs it):
+    /// orbit the move target (`ai + 0x214`, the `AISetMoveThing` verb's thing). The pass re-arms
+    /// at `now + intArg[0]` up front; without a move thing it does nothing. The view refresh
+    /// (`0x4eaf40`) gates the whole body: `fltArg[2] >= view.dist` and the sight code 0. The orbit
+    /// arm is the vector from the target back toward the actor (`view.dir × -view.dist`, the
+    /// engine's `ai + 0x228..0x230` reads — the slots this port's `ai_view` already carries),
+    /// kept when `intArg[4]` is set or it lies on the target's facing side
+    /// (`dot` of the look row `thing + 0x94..0x9c` with that vector `>= 0`). The strafe sign is
+    /// the instinct's word: ±1 rolled once (`0.5 <= rand/32767`), and the side angle is
+    /// `fltArg[1]` degrees flat, or `(rand/32767 + 0.5) × sign × fltArg[1]` when `intArg[4]` is
+    /// set. `rdVector_Rotate3(v, {0, side, 0})` is an Euler yaw by that many degrees — the port's
+    /// own `rotate3_yaw` — giving the candidate at `target.pos + rotated`; the reach test at the
+    /// target clears the walk: `SetMoveThing(cand, 0.5)`, look at the target, re-arm at
+    /// `now + intArg[3]`. A blocked reach flips the word.
+    fn sith_ai_cmd_circlestrafe(&mut self, index: usize, slot: usize, instinct: &crate::ai::Instinct) -> bool {
+        self.ai_rearm(index, slot, self.time + instinct.weight / 1000.0);
+        let Some(&center) = self.ai_move_thing.get(&index) else { return false };
+        let Some(cpos) = self.things.get(center).map(|t| t.pos) else { return false };
+        let eye = self.ai_eye(index);
+        self.sith_ai_sub_4eaf40(index, eye);
+        let Some(view) = self.ai_view.get(&index).copied() else { return false };
+        let angle = instinct.args.first().copied().unwrap_or(0.0);
+        let range = instinct.args.get(1).copied().unwrap_or(0.0);
+        let after = instinct.args.get(2).copied().unwrap_or(0.0);
+        let live = instinct.args.get(3).copied().unwrap_or(0.0);
+        if range < view.dist || view.sight != 0 {
+            return false;
+        }
+        let v = view.dir.map(|d| d * -view.dist);
+        if live == 0.0 {
+            // The look row `rdMatrix_BuildRotate34` writes at `+0x94..0x9c`:
+            // `forward_of_yaw(yaw)·cos(pitch)` with `sin(pitch)` as z.
+            let [fx, fy] = forward_of_yaw(self.things.get(center).map(|t| t.yaw).unwrap_or(0.0));
+            let pitch = self.things.get(center).map(|t| t.pitch).unwrap_or(0.0);
+            let (sp, cp) = pitch.to_radians().sin_cos();
+            let look = [fx * cp, fy * cp, sp];
+            if look[0] * v[0] + look[1] * v[1] + look[2] * v[2] < 0.0 {
+                return false;
+            }
+        }
+        let word = self.ai_inst_word.entry((index, slot)).or_insert(0.0);
+        if *word == 0.0 || live != 0.0 {
+            *word = if crate::cog::pseudo_random() as f32 >= 0.5 { 1.0 } else { -1.0 };
+        }
+        let sign = *word;
+        let side = if live == 0.0 {
+            angle * sign
+        } else {
+            (crate::cog::pseudo_random() as f32 + 0.5) * sign * angle
+        };
+        let rotated = rotate3_yaw(v, side);
+        let cand = [cpos[0] + rotated[0], cpos[1] + rotated[1], cpos[2] + rotated[2]];
+        let Some(class) = self.ai.get(&index).cloned() else { return false };
+        let (code, _, _) = self.sith_ai_sub_4eb300(center, cpos, cand, class.sightdist);
+        if code == 0 {
+            self.ai_set_move_thing(index, cand, 0.5);
+            self.ai_set_look_frame(index, cpos);
+            self.ai_rearm(index, slot, self.time + after / 1000.0);
+        } else {
+            self.ai_inst_word.insert((index, slot), -sign);
+        }
+        false
     }
 
     /// `listen` (`0x50a6f0`, events 1/2/4 — its registry mask `0x7`): awake only. Event 2 walks
@@ -19635,6 +19704,60 @@ mod tests {
         let word = rt.ai_flags.get(&1).copied().unwrap_or(0);
         assert!(word & 0xA00 == 0 && word & 0x4 != 0, "the mode word did not reset to awake: {word:#x}");
         assert_eq!(rt.ai_inst_word.get(&(1, 0)), Some(&0.0), "the flee clock was not zeroed");
+    }
+
+    /// `circlestrafe` (`0x509890`): with the move target set and the view inside `fltArg[2]`,
+    /// the pass orbits — the candidate sits `fltArg[1]` degrees around the target on the ring
+    /// the view distance spans, the walk goes at 0.5, the look at the target — and a blocked
+    /// reach flips the strafe sign instead of moving.
+    #[test]
+    fn circlestrafe_orbits_the_move_target() {
+        let mut rt = door_runtime();
+        let mut actor = rt.things[0].clone();
+        actor.pos = [2.0, 0.0, 0.0];
+        let mut player = rt.things[0].clone();
+        player.pos = [0.0, 0.0, 0.0];
+        rt.things = vec![player.clone(), actor];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.ai.insert(
+            1,
+            // weight 1000 ms, fltArg[1] 30 degrees, fltArg[2] 5.0 range, intArg[3] 500 ms,
+            // intArg[4] 0 (the facing gate runs).
+            crate::ai::parse("alignment=-1.0, rank=0.5, sightdist=10.0\n\nCircleStrafe 1000.0, 30.0, 5.0, 500.0, 0.0\n"),
+        );
+        rt.ai_flags.insert(1, 0x2);
+        rt.ai_inst.insert(1, vec![0.0]);
+        // The player faces +y (yaw 0), so the actor at +x is on its right: the facing gate passes.
+        // The view the orbit describes is the fire target's (the engine's own arm when one is
+        // set); without it `0x4eaf40` would judge the unset move position at distance 0.
+        rt.ai_fire_target.insert(1, 0);
+        rt.ai_move_thing.insert(1, 0);
+        rt.ai_tick(0, 1.0 / 30.0);
+        let point = rt.ai_move.get(&1).copied().expect("circlestrafe ordered no move");
+        // ±30° off the arm toward the actor: |y| = 2·sin(30°) = 1, x stays 2·cos(30°).
+        assert!((point[0] - 2.0 * 30.0_f32.to_radians().cos()).abs() < 1e-5, "{point:?}");
+        assert!((point[1].abs() - 1.0).abs() < 1e-5, "{point:?}");
+        assert_eq!(rt.ai_move_speed.get(&1), Some(&0.5));
+        assert!(rt.ai_look_dir.get(&1).is_some(), "circlestrafe did not look at the target");
+        assert!(rt.ai_inst_word.get(&(1, 0)).copied().is_some_and(|w| w == 1.0 || w == -1.0));
+
+        // The gate: sight code nonzero (out of the class's 10.0 sight) orders nothing.
+        let mut far = door_runtime();
+        let mut actor = far.things[0].clone();
+        actor.pos = [20.0, 0.0, 0.0];
+        let player = far.things[0].clone();
+        far.things = vec![player, actor];
+        far.templates = vec!["walkplayer".into(), "tuskan".into()];
+        far.types = vec![10, 2];
+        far.ai.insert(
+            1,
+            crate::ai::parse("alignment=-1.0, rank=0.5, sightdist=10.0\n\nCircleStrafe 1000.0, 30.0, 5.0, 500.0, 0.0\n"),
+        );
+        far.ai_fire_target.insert(1, 0);
+        far.ai_move_thing.insert(1, 0);
+        far.ai_tick(0, 1.0 / 30.0);
+        assert!(far.ai_move.get(&1).is_none(), "an out-of-range view still orbited");
     }
 
     /// A door-runtime pair for the per-thing arms: thing 0 the player, thing 1 an actor of
