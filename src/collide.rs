@@ -835,7 +835,7 @@ pub struct Sweep {
 }
 
 #[derive(Clone, Copy)]
-enum CollisionRecord {
+pub(crate) enum CollisionRecord {
     Solid(Sweep),
     Crossing { distance: f32, sector: usize, surface: usize },
     Adjoin { distance: f32, sector: usize },
@@ -886,7 +886,7 @@ pub struct CollisionSearch {
 }
 
 impl CollisionSearch {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { records: [None; 128], count: 0, sectors: [0; 64], sector_count: 0, excluded_thing: None }
     }
 
@@ -910,7 +910,7 @@ impl CollisionSearch {
         true
     }
 
-    fn pop(&mut self) -> Option<CollisionRecord> {
+    pub(crate) fn pop(&mut self) -> Option<CollisionRecord> {
         pop_collision(&mut self.records[..self.count])
     }
 }
