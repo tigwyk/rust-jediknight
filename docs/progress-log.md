@@ -8013,3 +8013,34 @@ body. Later ticks are unchanged. The audio gate reads 1 drift and 0 failures.
 `(-10.273, -5.225, -1.119)` at 1.2 s; the `d760bb1` build's stand-in walk had it at `(-10.295, -5.119, -1.100)`.
 Its scripted move starts near 1.0 s and the body accelerates from rest through the move arm. The
 retail positions of 207 and the cantina actors at route tick 0 are still the open question on #106.
+
+## #111: the per-thing arms (spec #108)
+
+`sithThing_Update`'s (`0x4cc1e0`) remaining per-thing arms are ported:
+
+- `sithActor_Update` (`0x4ecbe0`) runs for actors and, after `sithPlayer_Update`, for the player.
+  The air clock (`Runtime::air_ms`) grows underwater; from 20 001 ms the actor takes
+  `DamageThing(self, self, 10.0, 0x20)` and the clock drops 2 000. Out of water it plays `breath`
+  (`0x45`, over 10 000 ms) or `gasp` (`0x46`, over 18 000 ms) and resets. The mode names were read
+  from the image's sound-mode table at `0x54b408`.
+- The lifetime arm calls each type's destroy function: `sithActor_DestroyActor` (`0x4ed760`, the
+  actor becomes a type-9 corpse with 20 000 ms), `sithWeapon_DestroyWeapon` (`0x4d5160`, the
+  `explode=` thing for typeflag `0x100`, the 2.0 awareness event for the player's weapons), and
+  `sithThing_DestroyThing` (`0x4cc7a0`, flag 2 and `removed` to a cog-linked thing) for items,
+  corpses, particles and the default case. The player's type does nothing. The `destroything` cog
+  verb (`FUN_00502600`) now calls the same `DestroyThing`.
+- The destroyed-thing arm (`0x4cc1e0:95-138`) runs for a flag-2 thing: detach, exit the sector
+  (`exited` to a cog-linked sector), `sithAI_Free`, the puppet's key, type 0 and the free-index
+  stack.
+- `sithPlayer_Update` (`0x4c89d0`) was read. The tint decay now clamps to 1.0 as the engine does.
+
+Named remainders, each with a shortcut comment at its site: the corpse and item 3 000 ms deferral
+for a thing drawn last frame (the runtime does not know what was drawn), `DestroyItem`'s respawn
+branch (the port's `respawning` queue handles taken items), `DestroyParticle`'s element shedding,
+`DestroyActor`'s closing `FindFloor`, `sithSoundMixer_FreeThing`, slot reuse at creation (the port
+appends), and in `sithPlayer_Update` the add-light byte decay, the player's weapon state and
+`SendFire` calls, and the pit-fall death arm (sector flag `0x40`).
+
+A/B against #110 (`325c08f`), same session: the unit suite (465) and the eleven port checks pass.
+The trace, encounter, audio and level-1 route gates read the same as #110 against the oracles
+re-recorded there, and the level-2 and chain route outputs are identical. No oracle changes.

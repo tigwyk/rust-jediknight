@@ -416,6 +416,8 @@ pub const DAMAGE_ENERGY: u32 = 0x02;
 /// Fire (0x04) is the other kind `item_shields.cog` protects, beside energy.
 pub const DAMAGE_FIRE: u32 = 0x04;
 pub const DAMAGE_SABER: u32 = 0x10;
+/// `sithActor_Update`'s drowning hit (`0x4ecbe0`, `DamageThing(..., 0x20)`).
+pub const DAMAGE_DROWN: u32 = 0x20;
 pub const DAMAGE_FALL: u32 = 0x40;
 /// `sithActor_PlayDamageSoundFx` (`0x4ece90`) only cries out for a blow of at least **3** points
 /// (`_DAT_005230c4`), at a volume of `damage / health * 1.5` (`_DAT_005230c8`) clamped to 1.0, and
@@ -1366,6 +1368,11 @@ pub struct Runtime {
     pub ai_flags: std::collections::BTreeMap<usize, u32>,
     pub item_flags: std::collections::BTreeMap<usize, u32>,
     pub life_left: std::collections::BTreeMap<usize, f32>,
+    /// `sithActor_Update`'s air clock (`thing + 0x13c`, engine ms): time spent underwater.
+    pub air_ms: std::collections::BTreeMap<usize, u32>,
+    /// The free-index stack (`DAT_008326b0`, `sithThing_FreeThingIndex` `0x4cf690`): slots the
+    /// destroyed-thing arm recycled.
+    pub free_things: Vec<usize>,
     /// The life a thing was created with — `explosionParams.msecLifeLeft` in the engine, captured
     /// so a sprite's frame count can be spread over the thing's whole life rather than a guess.
     pub life_total: std::collections::BTreeMap<usize, f32>,
@@ -2524,6 +2531,8 @@ impl Runtime {
             ai_flags: Default::default(),
             item_flags: Default::default(),
             life_left: Default::default(),
+            air_ms: Default::default(),
+            free_things: Vec::new(),
             life_total: Default::default(),
             // A thing's mass comes from its template (`sithThing_ParseArg`'s `mass=`, `+0x204`), which is
             // also the gravity arm's gate. Scripts can still overwrite it with `SetThingMass`.
@@ -3373,7 +3382,7 @@ impl Runtime {
         }
     }
 
-    /// One thing's turn in `sithThing_Update` (`0x4cc1e0:24-93`), in the engine's slot order.
+    /// One thing's turn in `sithThing_Update` (`0x4cc1e0:24-138`), in the engine's slot order.
     fn sith_thing_update_one(
         &mut self,
         pass: &mut ThingPass,
@@ -3381,19 +3390,22 @@ impl Runtime {
         i: usize,
     ) {
         let dt = pass.dt;
+        let Some(flags) = self.things.get(i).map(|t| t.flags) else { return };
+        // A recycled slot (`type == 0`) is skipped; a thing with flag 2 takes the destroyed arm.
+        if flags & 2 != 0 {
+            if self.types.get(i).copied() != Some(0) {
+                self.sith_thing_free_destroyed(i);
+            }
+            return;
+        }
         // 1. The lifetime countdown (`0x4cc1e0:24-61`): `timer=`/`SetLifeLeft` reaching zero
-        // destroys the thing. Without this an impact spark lives forever, and a corpse never goes
-        // away.
+        // calls the thing type's destroy function.
         if let Some(left) = self.life_left.get_mut(&i) {
             *left -= dt;
             if *left <= 0.0 {
                 self.life_left.remove(&i);
                 self.life_total.remove(&i);
-                // A projectile whose `timer=` ran out never landed: it is a miss in the chronology.
-                self.note_shot_lost(i);
-                if let Some(thing) = self.things.get_mut(i) {
-                    thing.destroyed = true;
-                }
+                self.sith_thing_destroy_by_type(i);
             }
         }
         // 2. `sithCog_UpdateThingTimer` (thingflags `0x60000`, `0x4cc1e0:64-66`): a passed
@@ -3418,11 +3430,19 @@ impl Runtime {
         // `sithExplosion_Update` and `sithParticle_Update` have no port yet.
         let ai_geometry = geometry.or(pass.stored.as_deref());
         self.sith_ai_tick(i, dt, ai_geometry);
-        // 4. The type arms (`0x4cc1e0:77-86`).
+        // 4. The type arms (`0x4cc1e0:77-86`): an actor runs `sithActor_Update`; the player runs
+        // `sithPlayer_Update` and then the same actor arm.
+        let ms = (dt * 1000.0).round() as u32;
         match self.types.get(i).copied() {
             Some(3) => self.sith_weapon_update(i, dt),
+            Some(2) => self.sith_actor_update(i, ms),
+            Some(10) => {
+                if Some(i) == pass.player_at {
+                    self.sith_player_update(dt);
+                }
+                self.sith_actor_update(i, ms);
+            }
             _ if Some(i) == pass.player_at => self.sith_player_update(dt),
-            // shortcut: `sithActor_Update` (drowning) has no port yet (#111).
             _ => {}
         }
         // 5. `sithPhysics_UpdateThing` (move=physics) or the frame path (move=path), then 6.
@@ -3443,8 +3463,17 @@ impl Runtime {
         }
     }
 
-    /// `sithPlayer_Update`'s slot for the local player: the dynamic tint decay and the force mana
-    /// regeneration.
+    /// `sithPlayer_Update`'s (`0x4c89d0`) slot for the local player: the palette effect's tint
+    /// decay, plus the port's force mana regeneration (which the engine runs from `jkPlayer`, not
+    /// here).
+    ///
+    /// shortcut: `sithPlayer_Update` also decays the effect's three add-light bytes (by the
+    /// truncated `dt × 0.4`, so 0 at frame rates), runs `sithWeapon_UpdateActorWeaponState` and
+    /// `sithInventory_SendFire` for the player (the port's bin cadence runs in
+    /// `sith_update_head`), and the pit-fall arm (sector flag `0x40`, unattached, `vel.z < -3.0`:
+    /// typeflag `0x400000`, thing flag `0x200`, the camera focus, and `KillPlayer` when the effect's
+    /// `+0x24` clock, falling by `dt × 0.7`, reaches 0). None of these is ported; upgrade when a
+    /// level with a pit sector is tested.
     fn sith_player_update(&mut self, dt: f32) {
         self.decay_dynamic_tint(dt);
         // Force mana regenerates — but only for a Jedi that has a pool. `kyle.cog`'s class script
@@ -3461,6 +3490,214 @@ impl Runtime {
                 *mana = (*mana + self.mana_regen * dt).min(self.mana_max);
             }
         }
+    }
+
+    /// `sithActor_Update` (`0x4ecbe0`): the air clock (`thing + 0x13c`, engine ms). Skipped for
+    /// typeflag `0x40` and thing flags `0x202`. Underwater (sector flag 2, physflag `0x100000`
+    /// clear) the clock grows by the frame's ms; at 20 001 ms (`0x4e21`) the actor takes
+    /// `DamageThing(self, self, 10.0, 0x20)` and the clock drops 2 000. Out of water a non-zero
+    /// clock plays mode `0x46` (`gasp`, over 18 000 ms) or `0x45` (`breath`, over 10 000 ms) and
+    /// resets to 0.
+    fn sith_actor_update(&mut self, i: usize, ms: u32) {
+        let template = self.templates.get(i).map(|n| n.to_ascii_lowercase()).unwrap_or_default();
+        let typeflags = self.template_typeflags.get(&template).copied().unwrap_or(0);
+        let Some(t) = self.things.get(i) else { return };
+        if typeflags & 0x40 != 0 || t.flags & 0x202 != 0 || t.destroyed {
+            return;
+        }
+        let (pos, phys) = (t.pos, t.phys_flags);
+        let underwater = usize::try_from(t.sector)
+            .ok()
+            .and_then(|s| self.sector_flags.get(s))
+            .is_some_and(|f| f & crate::collide::SECTOR_UNDERWATER != 0);
+        let clock = self.air_ms.get(&i).copied().unwrap_or(0);
+        if phys & 0x100000 == 0 && underwater {
+            let now = clock + ms;
+            self.air_ms.insert(i, now);
+            if now < 0x4e21 {
+                return;
+            }
+            self.damage_typed_from(i as i64, 10.0, DAMAGE_DROWN, i as i64);
+            *self.air_ms.entry(i).or_insert(0) -= 2000;
+            return;
+        }
+        if clock == 0 {
+            return;
+        }
+        if clock >= 0x4651 {
+            self.queue_mode_sound(i, "gasp", pos);
+        } else if clock >= 0x2711 {
+            self.queue_mode_sound(i, "breath", pos);
+        }
+        self.air_ms.insert(i, 0);
+    }
+
+    /// `sithThing_DestroyThing` (`0x4cc7a0`): thing flag 2, and `removed` (cog message 2) to a
+    /// cog-linked thing (`0x400`) that is not `0x100`.
+    pub fn sith_thing_destroy_thing(&mut self, i: usize) {
+        let Some(t) = self.things.get_mut(i) else { return };
+        let old = t.flags;
+        t.flags |= 2;
+        t.destroyed = true;
+        if old & 0x400 != 0 && old & 0x100 == 0 {
+            self.sith_cog_thing_send_message(i, None, "removed");
+        }
+    }
+
+    /// The lifetime arm's switch (`0x4cc1e0:30-55`): the type's own destroy function.
+    fn sith_thing_destroy_by_type(&mut self, i: usize) {
+        match self.types.get(i).copied() {
+            Some(2) => self.sith_actor_destroy_actor(i),
+            Some(3) => {
+                // A projectile whose `timer=` ran out never landed: a miss in the chronology.
+                self.note_shot_lost(i);
+                self.sith_weapon_destroy_weapon(i);
+            }
+            // `sithItem_DestroyItem` (`0x4fbf30`), `sithActor_DestroyCorpse` (`0x4ed7b0`) and
+            // `sithParticle_DestroyParticle` (`0x4f2010`) end in `DestroyThing`.
+            // shortcut: their deferrals are not ported — a corpse or item drawn in the last
+            // frame (`thing + 0x120 + 1 == the render frame`) gets 3 000 ms more, an item with a
+            // respawn sector and typeflag 2 respawns there (the port's `respawning` queue
+            // handles taken items instead), and a particle cloud with typeflag 8 sheds elements
+            // and lives on. Upgrade when the runtime knows which things were drawn.
+            Some(5 | 9 | 11) => self.sith_thing_destroy_thing(i),
+            Some(10) => {}
+            _ => self.sith_thing_destroy_thing(i),
+        }
+    }
+
+    /// `sithActor_DestroyActor` (`0x4ed760`): an actor whose life runs out becomes a corpse —
+    /// thing flag `0x200`, its attached things detached, type 9, physflags
+    /// `& 0xffffd67f | 0x51`, and 20 000 ms of life.
+    ///
+    /// shortcut: the closing `sithPhysics_FindFloor(thing, 0)` is left to the next physics step's
+    /// floor search.
+    fn sith_actor_destroy_actor(&mut self, i: usize) {
+        if let Some(t) = self.things.get_mut(i) {
+            t.flags |= 0x200;
+        }
+        let children: Vec<usize> = (0..self.things.len())
+            .filter(|&c| self.things[c].attach == Some(i))
+            .collect();
+        for child in children {
+            self.sith_thing_detach_thing(child);
+        }
+        if let Some(kind) = self.types.get_mut(i) {
+            *kind = 9;
+        }
+        if let Some(t) = self.things.get_mut(i) {
+            t.phys_flags = t.phys_flags & 0xffff_d67f | 0x51;
+        }
+        self.life_left.insert(i, 20.0);
+    }
+
+    /// `sithWeapon_DestroyWeapon` (`0x4d5160`): a weapon with typeflag `0x100` creates its
+    /// `explode=` thing where it is; when the weapon's parent is the local player the explosion
+    /// raises an awareness event (kind 0, strength 2.0, `0x40000000`) with the player as source,
+    /// and a weapon carrying thing flag `0x100` passes it on. Then `DestroyThing`.
+    fn sith_weapon_destroy_weapon(&mut self, i: usize) {
+        let template = self.templates.get(i).map(|n| n.to_ascii_lowercase()).unwrap_or_default();
+        let typeflags = self.template_typeflags.get(&template).copied().unwrap_or(0);
+        if typeflags & 0x100 != 0 && let Some(blast) = self.explode(i) {
+            let parent = self.thing_parent(i);
+            if Some(parent) == self.local_player() {
+                let (sector, at) = (self.things[blast].sector, self.things[blast].pos);
+                self.transmit_awareness(sector, 0, at, AI_AWARE_WEAPON, Some(parent));
+            }
+            if self.things[i].flags & 0x100 != 0 {
+                self.things[blast].flags |= 0x100;
+            }
+        }
+        self.sith_thing_destroy_thing(i);
+    }
+
+    /// `sithThing_GetThingParent` (`0x4cc6a0`): the owner chain's root.
+    fn thing_parent(&self, mut i: usize) -> usize {
+        while let Some(owner) = self.things.get(i).and_then(|t| t.owner).filter(|o| *o != i) {
+            i = owner;
+        }
+        i
+    }
+
+    /// `sithThing_DetachThing` (`0x4ce380`): drop the thing's floor seat or parent, carrying the
+    /// support's velocity and sending `exited` as [`Self::detach_support`] does.
+    fn sith_thing_detach_thing(&mut self, i: usize) {
+        let Some(t) = self.things.get(i) else { return };
+        let (seat, parent, flags, mut vel) = (t.floor_attach, t.attach, t.flags, t.vel);
+        if seat.is_none() && parent.is_none() {
+            return;
+        }
+        let support = parent.or(seat.and_then(|a| a.thing.map(|hit| hit.thing)));
+        self.detach_support(Some(i), seat.and_then(|a| a.surface), support, flags, Some(&mut vel));
+        let t = &mut self.things[i];
+        t.vel = vel;
+        t.floor_attach = None;
+        t.attach = None;
+        t.attach_flags = 0;
+    }
+
+    /// The destroyed-thing arm (`0x4cc1e0:95-138`) for a thing with flag 2: detach, exit the
+    /// sector (`exited` to a cog-linked sector, `sithThing_ExitSector` `0x4cd220`), free the AI
+    /// (`sithAI_Free`, `0x4e9d80`) and the puppet (`sithPuppet_Free`, `0x4e3d70`), and recycle the
+    /// slot (type 0, the free-index stack).
+    ///
+    /// shortcut: `sithSoundMixer_FreeThing`'s stop of the thing's playing sounds is not ported,
+    /// and the port's creation appends a new slot instead of popping the free stack
+    /// (`sithThing_CreateThingAtPos`, `0x4cd9e0`); upgrade when thing indices must match retail's.
+    fn sith_thing_free_destroyed(&mut self, i: usize) {
+        self.sith_thing_detach_thing(i);
+        let (sector, flags) = (self.things[i].sector, self.things[i].flags);
+        if let Ok(s) = usize::try_from(sector) {
+            if flags & 0x80100 == 0 && self.sector_flags.get(s).is_some_and(|f| f & 4 != 0) {
+                self.sith_cog_sector_send_message(s, Some(i), "exited");
+            }
+            self.things[i].sector = -1;
+        }
+        if self.ai.contains_key(&i) {
+            self.sith_ai_free(i);
+        }
+        self.play_key.remove(&i);
+        self.key_base.remove(&i);
+        self.air_ms.remove(&i);
+        if let Some(kind) = self.types.get_mut(i) {
+            *kind = 0;
+        }
+        self.free_things.push(i);
+    }
+
+    /// `sithAI_Free` (`0x4e9d80`): the AI block is zeroed and returned.
+    fn sith_ai_free(&mut self, i: usize) {
+        self.ai.remove(&i);
+        self.ai_flags.remove(&i);
+        self.ai_move.remove(&i);
+        self.ai_look.remove(&i);
+        self.ai_last_seen.remove(&i);
+        self.ai_last_seen_at.remove(&i);
+        self.ai_detected.remove(&i);
+        self.ai_cleared.remove(&i);
+        self.ai_detect_at.remove(&i);
+        self.ai_inst.remove(&i);
+        self.ai_next_due.remove(&i);
+        self.ai_turret_down.remove(&i);
+        self.ai_force.remove(&i);
+        self.ai_force_cool.remove(&i);
+        self.ai_saber.remove(&i);
+        self.ai_saber_cool.remove(&i);
+        self.ai_special.remove(&i);
+        self.ai_jump.remove(&i);
+        self.ai_move_speed.remove(&i);
+        self.ai_move_lock.remove(&i);
+        self.ai_look_dir.remove(&i);
+        self.ai_home.remove(&i);
+        self.ai_home_look.remove(&i);
+        self.ai_flee_until.remove(&i);
+        self.ai_withdraw.remove(&i);
+        self.ai_hitrun.remove(&i);
+        self.ai_randomturn.remove(&i);
+        self.ai_fire_target.remove(&i);
+        self.ai_flee.remove(&i);
+        self.ai_deferred_fire.remove(&i);
+        self.ai_fire_lock.remove(&i);
     }
 
     /// The player's tint and mana when the runtime has no player thing to update them: a test
@@ -4894,7 +5131,7 @@ impl Runtime {
     /// `0x1000` one-shot latch `sithAI_Create` seeds — are checked by the caller inside the tick's
     /// actor loop; what remains here is the pass deadline (`ai + 0x190 <= now`), which holds the
     /// whole slot until the earliest armed instinct of the modes the word accepts comes due.
-    fn ai_process(&mut self, index: usize, player: usize, dt: f32, ctx: &AiCtx) {
+    fn ai_process(&mut self, index: usize, player: usize, ctx: &AiCtx) {
         if self
             .ai_next_due
             .get(&index)
@@ -6065,7 +6302,7 @@ impl Runtime {
                 template: ai_template.clone(),
             };
             if ai.is_some() {
-                self.ai_process(index, player, dt, &ctx);
+                self.ai_process(index, player, &ctx);
             }
             // `forcepowers` (`0x40ff40`): the handler's own clock is `fltArg[0]`; while the target is
             // visible (`ai + 0x1f4 == 0`) and the ability cooldown (`ai + 0x288`) has passed, it
@@ -7680,7 +7917,7 @@ impl Runtime {
     /// zero. The damage flash and the `AddDynamicTint` verb are the only things that raise it.
     fn decay_dynamic_tint(&mut self, dt: f32) {
         for channel in &mut self.tint {
-            *channel = (*channel - dt * TINT_DECAY).max(0.0);
+            *channel = (*channel - dt * TINT_DECAY).clamp(0.0, 1.0);
         }
     }
 
@@ -10360,8 +10597,9 @@ impl Runtime {
             "getsectorlight" => Value::Num(self.sectors.get(idx(0) as usize).map(|s| s.light).unwrap_or(0.0) as f64),
 
             "destroything" => {
-                if let Some(t) = self.thing_mut(idx(0)) {
-                    t.destroyed = true;
+                // `FUN_00502600` (`destroything`) calls `sithThing_DestroyThing`.
+                if let Ok(i) = usize::try_from(idx(0)) && i < self.things.len() {
+                    self.sith_thing_destroy_thing(i);
                 }
                 Value::Nil
             }
@@ -18638,6 +18876,134 @@ mod tests {
         rt.things[1].phys_flags = 0;
         rt.sith_ai_msgarrived_target(1, 0.1, None);
         assert_eq!(rt.things[1].vel[2], 0.0, "a walker kept a z push: {:?}", rt.things[1].vel);
+    }
+
+    /// A door-runtime pair for the per-thing arms: thing 0 the player, thing 1 an actor of
+    /// template `tuskan` in sector 7, whose flags the caller sets.
+    fn arm_runtime() -> Runtime {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        rt.things = vec![base.clone(), base];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.sector_flags = vec![0; 8];
+        rt
+    }
+
+    /// `sithActor_Update` (`0x4ecbe0`): 20 000 ms underwater is still air; the frame that passes
+    /// it (`>= 0x4e21`) costs 10 drowning damage and drops the clock 2 000, so the next hit comes
+    /// 2.0 s later.
+    #[test]
+    fn an_actor_underwater_drowns_after_20_seconds_and_every_2_after() {
+        let mut rt = arm_runtime();
+        rt.sector_flags[7] = crate::collide::SECTOR_UNDERWATER;
+        rt.things[1].health = 100.0;
+        for _ in 0..200 {
+            rt.sith_actor_update(1, 100);
+        }
+        assert_eq!(rt.things[1].health, 100.0, "20.0 s underwater already hurt");
+        rt.sith_actor_update(1, 100);
+        assert_eq!(rt.things[1].health, 90.0, "20.1 s underwater did not drown");
+        for _ in 0..19 {
+            rt.sith_actor_update(1, 100);
+        }
+        assert_eq!(rt.things[1].health, 90.0, "the second hit came before 2.0 s");
+        rt.sith_actor_update(1, 100);
+        assert_eq!(rt.things[1].health, 80.0, "no second hit 2.0 s later");
+        // Physflag `0x100000` breathes underwater.
+        let mut gills = arm_runtime();
+        gills.sector_flags[7] = crate::collide::SECTOR_UNDERWATER;
+        gills.things[1].phys_flags |= 0x100000;
+        for _ in 0..300 {
+            gills.sith_actor_update(1, 100);
+        }
+        assert!(gills.air_ms.get(&1).is_none_or(|ms| *ms == 0), "physflag 0x100000 used air");
+    }
+
+    /// Out of water the clock plays `breath` (`0x45`) from 10 001 ms, `gasp` (`0x46`) from
+    /// 18 001 ms, and resets.
+    #[test]
+    fn surfacing_after_12_seconds_plays_breath() {
+        let mut rt = arm_runtime();
+        rt.template_soundclass.insert("tuskan".into(), "tusk.snd".into());
+        rt.sound_classes.insert(
+            "tusk.snd".into(),
+            [("breath".to_string(), vec![("breath.wav".to_string(), 1.0)]), ("gasp".to_string(), vec![("gasp.wav".to_string(), 1.0)])]
+                .into_iter()
+                .collect(),
+        );
+        rt.sector_flags[7] = crate::collide::SECTOR_UNDERWATER;
+        for _ in 0..120 {
+            rt.sith_actor_update(1, 100);
+        }
+        rt.sector_flags[7] = 0;
+        rt.sith_actor_update(1, 100);
+        assert_eq!(rt.last_sound.get(&(1, "breath".to_string())).map(String::as_str), Some("breath.wav"));
+        assert!(!rt.last_sound.contains_key(&(1, "gasp".to_string())), "12 s is not a gasp");
+        assert_eq!(rt.air_ms.get(&1), Some(&0), "surfacing did not reset the clock");
+    }
+
+    /// The lifetime arm (`0x4cc1e0:30-55`) calls each type's destroy function: an actor becomes a
+    /// corpse (`0x4ed760`), a weapon with typeflag `0x100` leaves its `explode=` (`0x4d5160`), a
+    /// corpse and the default type get flag 2, the player is untouched. The next tick's destroyed
+    /// arm recycles a flag-2 slot.
+    #[test]
+    fn a_timed_thing_is_destroyed_by_its_types_function() {
+        let expire = |kind: i32, setup: &dyn Fn(&mut Runtime)| {
+            let mut rt = arm_runtime();
+            rt.types[1] = kind;
+            setup(&mut rt);
+            rt.life_left.insert(1, 0.01);
+            rt.step(None, 1.0 / 30.0);
+            rt
+        };
+        let actor = expire(2, &|_| {});
+        assert_eq!(actor.types[1], 9, "an expired actor is not a corpse");
+        assert_ne!(actor.things[1].flags & 0x200, 0);
+        assert_eq!(actor.things[1].phys_flags & 0x51, 0x51);
+        assert_eq!(actor.life_left.get(&1), Some(&20.0), "a fresh corpse lives 20 000 ms");
+        assert_eq!(actor.things[1].flags & 2, 0, "DestroyActor does not destroy");
+
+        let weapon = expire(3, &|rt| {
+            rt.templates[1] = "+grenade".into();
+            rt.template_typeflags.insert("+grenade".into(), 0x100);
+            rt.template_explode.insert("+grenade".into(), "+boom".into());
+        });
+        assert_eq!(weapon.things.len(), 3, "the expired grenade left no explosion");
+        assert_ne!(weapon.things[1].flags & 2, 0, "the grenade was not destroyed");
+
+        let corpse = expire(9, &|_| {});
+        assert_ne!(corpse.things[1].flags & 2, 0, "an expired corpse was kept");
+        let debris = expire(4, &|_| {});
+        assert_ne!(debris.things[1].flags & 2, 0, "the default type was kept");
+        let mut player = expire(10, &|rt| rt.types[0] = 2);
+        assert_eq!(player.things[1].flags & 2, 0, "an expired player was destroyed");
+
+        // The destroyed arm: type 0, out of its sector, the slot on the free stack.
+        let mut debris = debris;
+        debris.step(None, 1.0 / 30.0);
+        assert_eq!(debris.types[1], 0);
+        assert_eq!(debris.things[1].sector, -1);
+        assert_eq!(debris.free_things, vec![1]);
+        player.step(None, 1.0 / 30.0);
+    }
+
+    /// The default arm (`0x4cc1e0:42-47`) messages a cog-linked thing (`0x400`) with `removed`
+    /// (2) unless it carries `0x100`.
+    #[test]
+    fn a_default_type_expiry_with_thingflag_0x400_messages_its_cog() {
+        let removed = |flags: u32| {
+            let mut rt = arm_runtime();
+            rt.types[1] = 4;
+            rt.things[1].flags = flags;
+            rt.thing_links.push((9, 0, 1));
+            rt.life_left.insert(1, 0.01);
+            rt.step(None, 1.0 / 30.0);
+            rt.pending_messages.iter().any(|(instance, msg, ..)| *instance == 9 && *msg == "removed")
+        };
+        assert!(removed(0x400), "a cog-linked expiry sent no `removed`");
+        assert!(!removed(0x400 | 0x100), "a 0x100 thing sent `removed`");
+        assert!(!removed(0), "an unlinked thing sent `removed`");
     }
 
     /// `opendoors` (handler 0x50abc0) runs the **player's activate action** on the actor's own body:
