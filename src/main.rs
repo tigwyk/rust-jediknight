@@ -3724,7 +3724,7 @@ fn main() {
                     println!("endlevel: 8t88 walked {walked:.2} units along that frame in 1 s");
                     assert!(
                         walked > 0.1,
-                        "the class-less actor did not walk its scripted frame ({walked:.2})"
+                        "8t88 did not walk his scripted frame ({walked:.2})"
                     );
                 }
                 assert!(

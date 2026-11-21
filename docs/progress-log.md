@@ -8044,3 +8044,27 @@ appends), and in `sithPlayer_Update` the add-light byte decay, the player's weap
 A/B against #110 (`325c08f`), same session: the unit suite (465) and the eleven port checks pass.
 The trace, encounter, audio and level-1 route gates read the same as #110 against the oracles
 re-recorded there, and the level-2 and chain route outputs are identical. No oracle changes.
+
+## #112: the spec #108 contract
+
+The ledger and the stage table are refreshed for the world tick: *AI walkability* is retired by
+#110, *thing-vs-thing collision* no longer names the unswept actor walk, the *AI named remainders*
+row names the five unported movers, a new *world tick remainders* row names every slot the port
+does not run yet, the *puppet clip timing* row no longer reads `walk_vel`, and stages 2, 5 and 6
+carry the spec's results. `src/` keeps no `ai_can_walk` stand-in, `walk_vel`, `settle_walked`,
+`sector_route` or `ai_route`.
+
+#106, port side. At route tick 0 nothing has run, so each actor stands where the level places it
+(`01narshadda.jkl`):
+
+| thing | template | position | sector |
+|-------|----------|----------|--------|
+| 207 (Rodian, `ryinitial.ai`) | `reeyeesbhgun` | -10.269, -5.245, -1.119 | 339 |
+| 181 | `reeyeesbhgun` | -2.774, -2.798, -1.169 | 254 |
+| 182 | `reeyeesgun` | -2.583, -2.942, -1.169 | 254 |
+| 272 (`pedroamnarsh.ai`) | `nman1` | -2.846, 10.946, 6.729 | 431 |
+
+With the AI running from load (the route plan without `--no-ai`, `BK_ACTOR_TRACE`), 181 has not
+moved after 40 frames and 207 is at -10.272, -5.229 (0.017 units, its scripted move starting). Only
+retail's own positions at that tick can say whether the spawn wedge's remaining 72 ticks come from
+an actor; that half stays on #106 for a user capture.
