@@ -973,6 +973,13 @@ achievable from the shipped artifacts, the decomp and the file probes has been m
 - Rank open work by what a player meets: first what stops a level being finished, then what a player
   can see or hear, then position drift. The walk-trace legs are regression checks: a leg that moves is
   examined against the decomp, never tuned back inside its tolerance (issue #23).
+- Retail comparisons do not block a merge (user decision after spec #99). `trace-gate.ps1` prints
+  `DRIFT` for a leg outside its tolerance, `route-gate.ps1` prints `DRIFT retail` for the retail
+  prefix, and `encounter-gate.ps1` prints `DRIFT` for a shot, hit, bar or actor comparison; none of
+  them fails the run. The frozen captures are confounded (clock quantisation, run-to-run variance, the
+  shared `rand()`, the capture's AI window, #106), so a change that transliterates the decomp may move
+  them. A merge needs the engine function's unit test and an explanation of each new drift in the
+  progress log; the port oracle, determinism and the route's own checks still fail on regression.
 
 ## What the retail harness already answers
 
