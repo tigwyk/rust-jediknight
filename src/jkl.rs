@@ -180,6 +180,8 @@ pub struct Thing {
     pub sector: i32,
     /// `thingflags=` — the engine's per-thing state bits.
     pub flags: u32,
+    /// Placement `typeflags=` override; `None` retains the inherited template word.
+    pub type_flags: Option<u32>,
     /// `frame=(x/y/z:pitch/yaw/roll)…` — the thing's keyframe path, written straight
     /// into the level. Doors and lifts are exactly these lists: `MoveToFrame`
     /// interpolates them, and frame 0 is the position above. `.key` files are for
@@ -667,12 +669,18 @@ fn parse_thing(line: &str) -> Option<Thing> {
     // Per-thing state follows the sector column as `key=value` items; `frame=` may
     // repeat, one entry per keyframe.
     let mut flags = 0;
+    let mut type_flags = None;
     let mut frames = Vec::new();
     let mut vel = [0.0; 3];
     let mut aiclass = None;
     for word in f[9..].iter() {
         if let Some(v) = word.strip_prefix("thingflags=0x") {
             flags = u32::from_str_radix(v, 16).unwrap_or(0);
+        } else if let Some(v) = word.strip_prefix("typeflags=") {
+            let v = v.strip_prefix("0x").or_else(|| v.strip_prefix("0X")).unwrap_or(v);
+            if let Ok(value) = u32::from_str_radix(v, 16) {
+                type_flags = Some(value);
+            }
         } else if word.starts_with("frame=") {
             if let Some(fr) = Thing::parse_frame(word) {
                 frames.push(fr);
@@ -698,6 +706,7 @@ fn parse_thing(line: &str) -> Option<Thing> {
         roll: f[8].parse().unwrap_or(0.0),
         sector: f[9].parse().unwrap_or(-1),
         flags,
+        type_flags,
         frames,
         vel,
         aiclass,
@@ -748,6 +757,17 @@ mod tests {
         let actor = Thing::parse_frame("frame=(-4.476/15.877/3.840)").expect("actor frame");
         assert_eq!(actor, [-4.476, 15.877, 3.84, 0.0, 0.0, 0.0]);
         assert_eq!(Thing::parse_frame("frame=(1/2)"), None);
+    }
+
+    #[test]
+    fn placement_typeflags_override_is_optional_and_hexadecimal() {
+        let row = "0: actor actor 1 2 3 0 0 0 1";
+        assert_eq!(parse_thing(row).unwrap().type_flags, None);
+        assert_eq!(parse_thing(&format!("{row} typeflags=0x0")).unwrap().type_flags, Some(0));
+        assert_eq!(parse_thing(&format!("{row} typeflags=20")).unwrap().type_flags, Some(0x20));
+        assert_eq!(parse_thing(&format!("{row} typeflags=0X80000000")).unwrap().type_flags, Some(0x80000000));
+        assert_eq!(parse_thing(&format!("{row} typeflags=bad!")).unwrap().type_flags, None);
+        assert_eq!(parse_thing(&format!("{row} actorflags=0x20")).unwrap().type_flags, None);
     }
 
     /// A placement can override its template's `aiclass=`; the engine loads the placement's. Level

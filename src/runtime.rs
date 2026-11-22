@@ -258,6 +258,9 @@ pub struct ThingState {
     pub head_pitch: f32,
     pub sector: i32,
     pub flags: u32,
+    /// Shared actor, weapon, item, explosion and particle type word (`thing + 0x130`).
+    /// Cog aliases use the same getter (`0x504e60`), setter (`0x504ef0`), and clearer (`0x504f80`).
+    pub type_flags: u32,
     pub health: f32,
     /// Position along the thing's keyframe path, fractional while moving.
     pub frame: f32,
@@ -1366,14 +1369,13 @@ pub struct Runtime {
     ///
     /// Every one of these is named by a shipped script — `cog\force_pull.cog` and
     /// `cog\force_grip.cog` — which is why they exist at all (§16.5).
-    pub actor_flags: std::collections::BTreeMap<usize, u32>,
+    // Type flags live on each ThingState; AI mode flags remain a separate word.
     /// The AI's **own mode word** (`ai + 8` in `sithAI_Create`, `0x4e9cb0`): the word every instinct
     /// handler tests and `AISetMode`/`AIClearMode`/`AiGetMode` address. It starts at `0x1004` (the
     /// awake bit `0x4` plus the one-shot latch `0x1000` that only the awareness sweep's event 2
     /// clears). Kept apart from `actor_flags` because the engine's AI bit `0x8` ("turning") collides
     /// with `AF_INVULNERABLE` `0x8` on the sithActor word.
     pub ai_flags: std::collections::BTreeMap<usize, u32>,
-    pub item_flags: std::collections::BTreeMap<usize, u32>,
     pub life_left: std::collections::BTreeMap<usize, f32>,
     /// `sithActor_Update`'s air clock (`thing + 0x13c`, engine ms): time spent underwater.
     pub air_ms: std::collections::BTreeMap<usize, u32>,
@@ -1517,7 +1519,6 @@ pub struct Runtime {
     pub template_hit: BTreeMap<String, (f32, f32)>,
     template_height: BTreeMap<String, f32>,
     pub template_rate: BTreeMap<String, f32>,
-    pub template_decay: std::collections::BTreeSet<String>,
     /// Templates whose `typeflags` carry `SITHEXPLOSION_FLAG_ANIMATED_SPRITE` (`0x1`), the bit
     /// `sithExplosion_CreateThing` tests before it walks a sprite's cels.
     pub template_sprite_anim: std::collections::BTreeSet<String>,
@@ -2340,6 +2341,9 @@ impl Runtime {
                             .copied()
                             .unwrap_or(0)
                     },
+                    type_flags: if excluded[index] { 0 } else {
+                        t.type_flags.unwrap_or_else(|| template_typeflags.get(&t.template.to_ascii_lowercase()).copied().unwrap_or(0))
+                    },
                     health: if excluded[index] {
                         0.0
                     } else {
@@ -2353,11 +2357,10 @@ impl Runtime {
                     frames: t.frames.clone(),
                     destroyed: excluded[index],
                     vel: t.vel,
-                    // Placed things are not projectiles; a `CreateThing` gives them their
-                    // damage, and only a fired weapon decays.
-                    damage: 0.0,
-                    min_damage: 0.0,
-                    decay: 0.0,
+                    // The engine copies the template's damage, floor and rate into placed things too.
+                    damage: level.template_f32(&t.template, "damage").unwrap_or(0.0),
+                    min_damage: level.template_f32(&t.template, "mindamage").unwrap_or(0.0),
+                    decay: level.template_f32(&t.template, "rate").unwrap_or(0.0),
                     extra_speed: 0.0,
                     ai_target: None,
                     ai_wait: 0.0,
@@ -2547,9 +2550,8 @@ impl Runtime {
             surface_links: Vec::new(),
             mana_regen: MANA_REGEN,
             mana_max: MANA_MAX,
-            actor_flags: Default::default(),
+            // Type flags are initialized with the things above.
             ai_flags: Default::default(),
-            item_flags: Default::default(),
             life_left: Default::default(),
             air_ms: Default::default(),
             free_things: Vec::new(),
@@ -2592,20 +2594,6 @@ impl Runtime {
             // parser used for the other params: that returns None and every weapon looked
             // non-decaying.
 
-            template_decay: level
-                .templates
-                .iter()
-                .filter(|t| {
-                    level
-                        .template_param(&t.name, "typeflags")
-                        .and_then(|raw| {
-                            let raw = raw.trim();
-                            u32::from_str_radix(raw.trim_start_matches("0x").trim_start_matches("0X"), 16).ok()
-                        })
-                        .is_some_and(|flags| flags & 0x4000 != 0)
-                })
-                .map(|t| t.name.to_ascii_lowercase())
-                .collect(),
             // Bit 0 of the same word: `SITHEXPLOSION_FLAG_ANIMATED_SPRITE`, which is what makes
             // an impact spark walk its frames instead of showing the first one for its whole life.
             template_sprite_anim: level
@@ -2990,6 +2978,7 @@ impl Runtime {
             head_pitch: 0.0,
             sector,
             flags: 0,
+            type_flags: self.template_typeflags.get(&template).copied().unwrap_or(0),
             health,
             frame: 0.0,
             target: None,
@@ -3023,11 +3012,7 @@ impl Runtime {
                 .get(&template)
                 .copied()
                 .unwrap_or(0.0),
-            decay: if self.template_decay.contains(&template) {
-                self.template_rate.get(&template).copied().unwrap_or(0.0)
-            } else {
-                0.0
-            },
+            decay: self.template_rate.get(&template).copied().unwrap_or(0.0),
         });
         self.templates.push(template);
         self.types.push(kind);
@@ -3486,14 +3471,12 @@ impl Runtime {
     /// `sithWeapon_Update` (`0x4d3530`): damage decay and staggered weapon awareness.
     /// shortcut: the `0x2000` impact and `0x10000` beam arms need their collision chains.
     fn sith_weapon_update(&mut self, index: usize, dt: f32) {
-        let flags = self.templates.get(index)
-            .and_then(|name| self.template_typeflags.get(name).or_else(|| self.template_typeflags.get(&name.to_ascii_lowercase())))
-            .copied().unwrap_or(0);
+        let Some(thing) = self.things.get_mut(index) else { return };
+        let flags = thing.type_flags;
         if flags & 0x12000 != 0 {
             return;
         }
-        let Some(thing) = self.things.get_mut(index) else { return };
-        if thing.decay > 0.0 && thing.damage > thing.min_damage {
+        if flags & 0x4000 != 0 && thing.decay > 0.0 && thing.damage > thing.min_damage {
             thing.damage = (thing.damage - thing.decay * dt).max(thing.min_damage);
         }
         // shortcut: awareness is delivered immediately; upgrade when the engine event queue is ported.
@@ -3539,9 +3522,8 @@ impl Runtime {
     /// clock plays mode `0x46` (`gasp`, over 18 000 ms) or `0x45` (`breath`, over 10 000 ms) and
     /// resets to 0.
     fn sith_actor_update(&mut self, i: usize, ms: u32) {
-        let template = self.templates.get(i).map(|n| n.to_ascii_lowercase()).unwrap_or_default();
-        let typeflags = self.template_typeflags.get(&template).copied().unwrap_or(0);
         let Some(t) = self.things.get(i) else { return };
+        let typeflags = t.type_flags;
         if typeflags & 0x40 != 0 || t.flags & 0x202 != 0 || t.destroyed {
             return;
         }
@@ -3636,8 +3618,7 @@ impl Runtime {
     /// raises an awareness event (kind 0, strength 2.0, `0x40000000`) with the player as source,
     /// and a weapon carrying thing flag `0x100` passes it on. Then `DestroyThing`.
     fn sith_weapon_destroy_weapon(&mut self, i: usize) {
-        let template = self.templates.get(i).map(|n| n.to_ascii_lowercase()).unwrap_or_default();
-        let typeflags = self.template_typeflags.get(&template).copied().unwrap_or(0);
+        let typeflags = self.things.get(i).map_or(0, |t| t.type_flags);
         if typeflags & 0x100 != 0 && let Some(blast) = self.explode(i) {
             let parent = self.thing_parent(i);
             if Some(parent) == self.local_player() {
@@ -4217,6 +4198,11 @@ impl Runtime {
                 | "setactorflags"
                 | "clearactorflags"
                 | "getactorflags"
+                | "gettypeflags" | "settypeflags" | "cleartypeflags"
+                | "getweaponflags" | "setweaponflags" | "clearweaponflags"
+                | "getexplosionflags" | "setexplosionflags" | "clearexplosionflags"
+                | "setitemflags" | "clearitemflags"
+                | "getparticleflags" | "setparticleflags" | "clearparticleflags"
                 | "aigetmode"
                 | "getthingsignature"
                 | "bittest"
@@ -4596,7 +4582,7 @@ impl Runtime {
             .unwrap_or(80.0);
         // The head moves only while the actor word's bit `0x1` is set (`*(byte *)(iVar6 + 0x130)
         // & 1`, `0x4eab80`) — the engine leaves the pitch alone otherwise.
-        if self.actor_flags.get(&actor).copied().unwrap_or(0) & 0x1 != 0 {
+        if self.things.get(actor).is_some_and(|t| t.type_flags & 0x1 != 0) {
             if let Some(thing) = self.things.get_mut(actor) {
                 thing.head_pitch = (d[2] / len).asin().to_degrees().clamp(min, max);
             }
@@ -4936,7 +4922,7 @@ impl Runtime {
     fn sith_ai_msgarrived_target(&mut self, index: usize, dt: f32, solids: Option<&crate::collide::Solids>) {
         let flags = self.ai_flags.get(&index).copied().unwrap_or(0);
         let template = self.templates.get(index).map(|n| n.to_ascii_lowercase()).unwrap_or_default();
-        let typeflags = self.template_typeflags.get(&template).copied().unwrap_or(0);
+        let typeflags = self.things.get(index).map_or(0, |t| t.type_flags);
         if flags & 0x1000 != 0 || typeflags & 0x40000 != 0 {
             return;
         }
@@ -5615,12 +5601,7 @@ impl Runtime {
                 let Some(tpos) = self.things.get(target).map(|t| t.pos) else { return };
                 let mut preset = false;
                 for (who, bit) in [(target, 0x80), (index, 0x800)] {
-                    if let Some(name) = self.templates.get(who)
-                        && self
-                            .template_typeflags
-                            .get(&name.to_ascii_lowercase())
-                            .is_some_and(|flags| flags & bit != 0)
-                    {
+                    if self.things.get(who).is_some_and(|t| t.type_flags & bit != 0) {
                         preset = true;
                     }
                 }
@@ -5667,12 +5648,7 @@ impl Runtime {
         let view = self.ai_view.get(&index).copied().unwrap_or_default();
         let word = self.ai_inst_word.entry((index, slot)).or_insert(0.0);
         if view.sight != 0 && view.sight != 2 {
-            let target_typeflags = self
-                .templates
-                .get(target)
-                .and_then(|name| self.template_typeflags.get(&name.to_ascii_lowercase()))
-                .copied()
-                .unwrap_or(0);
+            let target_typeflags = self.things.get(target).map_or(0, |t| t.type_flags);
             if target_typeflags & 0x800 != 0 || *word != 0.0 {
                 return false;
             }
@@ -8652,7 +8628,7 @@ impl Runtime {
         // `sithAI_FireWeapon`'s puppet branch tests the **actor word** (`thing + 0x130`,
         // `puVar1[0x4c] & 0x20000`), not the thing's own flags — since #90's split that word is
         // `actor_flags`.
-        let (yaw, flags) = (t.yaw, self.actor_flags.get(&index).copied().unwrap_or(0));
+        let (yaw, flags) = (t.yaw, t.type_flags);
         let weapon = self
             .templates
             .get(index)
@@ -8957,6 +8933,7 @@ impl Runtime {
             sector,
             // A shot carries its template's `thingflags=`; the pre-sweep above read the same word.
             flags: self.template_thingflags.get(&key).copied().unwrap_or(0),
+            type_flags: self.template_typeflags.get(&key).copied().unwrap_or(0),
             health,
             frame: 0.0,
             target: None,
@@ -8986,15 +8963,11 @@ impl Runtime {
             ai_burst: 0.0,
             arrived: false,
             min_damage: self.template_min_damage.get(&key).copied().unwrap_or(damage),
-            decay: if self.template_decay.contains(&key) {
-                self.template_rate.get(&key).copied().unwrap_or(0.0)
-            } else {
-                0.0
-            },
+            decay: self.template_rate.get(&key).copied().unwrap_or(0.0),
         });
         // The projectile's typeflags decide whether the engine runs its player pre-sweep; read before
         // the template String moves into `self.templates`.
-        let pre_sweep = self.template_typeflags.get(&template).copied().unwrap_or(0) & 0x200000 != 0;
+        let pre_sweep = self.things.last().is_some_and(|t| t.type_flags & 0x200000 != 0);
         self.templates.push(template);
         self.types.push(kind);
         let index = self.things.len() - 1;
@@ -9994,6 +9967,7 @@ impl Runtime {
             head_pitch: 0.0,
             sector,
             flags: 0,
+            type_flags: self.template_typeflags.get(&explode).copied().unwrap_or(0),
             health,
             frame: 0.0,
             target: None,
@@ -10077,7 +10051,7 @@ impl Runtime {
             if std::env::var_os("BK_HIT_TRACE").is_some() {
                 eprintln!(
                     "hit: {amount:.0} ignored -- player thing {player} is invulnerable (flags {:#x})",
-                    self.actor_flags.get(&player).copied().unwrap_or(0)
+                    self.things.get(player).map_or(0, |t| t.type_flags)
                 );
             }
             return (
@@ -10360,7 +10334,7 @@ impl Runtime {
             && source > 0
             && usize::try_from(source).is_ok_and(|attacker| {
                 self.types.get(attacker).copied() == Some(2)
-                    && self.actor_flags.get(&attacker).copied().unwrap_or(0) & AF_ACTOR_FULL_DAMAGE == 0
+                    && self.things.get(attacker).is_none_or(|t| t.type_flags & AF_ACTOR_FULL_DAMAGE == 0)
             })
         {
             amount *= 0.1;
@@ -10506,7 +10480,7 @@ impl Runtime {
     /// `actor->flags & SITH_AF_INVULNERABLE` with the engine's fall exception.
     fn invulnerable(&self, index: usize, kind: u32) -> bool {
         kind != DAMAGE_FALL
-            && self.actor_flags.get(&index).copied().unwrap_or(0) & AF_INVULNERABLE != 0
+            && self.things.get(index).is_some_and(|t| t.type_flags & AF_INVULNERABLE != 0)
     }
 
     /// Report the launch of a shot that just landed on the player. Retail's door fixture can only
@@ -11924,7 +11898,8 @@ impl Runtime {
             // handler tests. The two words were conflated in one map until the flag-word split; the
             // engine's AI bit 0x8 ("turning", `SetLookFrame`) collides with `AF_INVULNERABLE` 0x8, so
             // keeping them apart is what lets the AI word carry the engine's bits 1:1.
-            "setactorflags" => {
+            "setactorflags" | "settypeflags" | "setweaponflags" | "setexplosionflags"
+            | "setitemflags" | "setparticleflags" => {
                 let actor = ti(0);
                 let mode = idx(1) as u32;
                 if mode & AF_INVULNERABLE != 0
@@ -11940,7 +11915,11 @@ impl Runtime {
                         self.caller_script
                     );
                 }
-                *self.actor_flags.entry(actor).or_insert(0) |= mode;
+                if matches!(self.types.get(actor), Some(2 | 3 | 5 | 6 | 10 | 11))
+                    && let Some(thing) = self.things.get_mut(actor)
+                {
+                    thing.type_flags |= mode;
+                }
                 Value::Nil
             }
             // `sithCogFunctionAI_AISetMode` (`FUN_00500f50`): `ai flags |= mode`, and when the word
@@ -11965,7 +11944,8 @@ impl Runtime {
                 }
                 Value::Nil
             }
-            "clearactorflags" => {
+            "clearactorflags" | "cleartypeflags" | "clearweaponflags" | "clearexplosionflags"
+            | "clearitemflags" | "clearparticleflags" => {
                 let actor = ti(0);
                 let mode = idx(1) as u32;
                 if mode & AF_INVULNERABLE != 0 && std::env::var_os("BK_HIT_TRACE").is_some() {
@@ -11975,7 +11955,11 @@ impl Runtime {
                         self.caller_script
                     );
                 }
-                *self.actor_flags.entry(actor).or_insert(0) &= !mode;
+                if matches!(self.types.get(actor), Some(2 | 3 | 5 | 6 | 10 | 11))
+                    && let Some(thing) = self.things.get_mut(actor)
+                {
+                    thing.type_flags &= !mode;
+                }
                 Value::Nil
             }
             "aiclearmode" => {
@@ -11999,7 +11983,14 @@ impl Runtime {
                 }
                 Value::Nil
             }
-            "getactorflags" => Value::Num(self.actor_flags.get(&ti(0)).copied().unwrap_or(0) as f64),
+            "getactorflags" | "gettypeflags" | "getweaponflags" | "getexplosionflags"
+            | "getitemflags" | "getparticleflags" => {
+                let index = ti(0);
+                let flags = self.things.get(index)
+                    .filter(|_| matches!(self.types.get(index), Some(2 | 3 | 5 | 6 | 10 | 11)))
+                    .map_or(-1, |thing| thing.type_flags as i32);
+                Value::Num(flags as f64)
+            }
             // `AiGetMode(thing)` reads the AI's own flag word (`ai + 8`) — the word `AISetMode`
             // writes and every instinct tests, which is what `actor_*.cog` means by
             // `BitTest(AiGetMode(me), 0x800)`.
@@ -12381,7 +12372,6 @@ impl Runtime {
                 self.life_left.insert(ti(0), num(1) as f32);
                 Value::Nil
             }
-            "getitemflags" => Value::Num(self.item_flags.get(&ti(0)).copied().unwrap_or(0) as f64),
             // `GetParam(n)`: the payload a timer carried. `SetTimerEx(delay, type, sender, param)`
             // stores it; grip uses it to check a thing signature is still the same thing.
             "getparam" => Value::Num(usize::try_from(idx(0)).ok().and_then(|i| self.last_params.get(i)).copied().unwrap_or(0.0)),
@@ -13605,6 +13595,7 @@ mod tests {
             roll: 0.0,
             sector: 0,
             flags,
+            type_flags: None,
             frames: Vec::new(),
             vel: [0.0; 3],
             aiclass: None,
@@ -13696,6 +13687,7 @@ mod tests {
             roll: 0.0,
             sector: 0,
             flags,
+            type_flags: None,
             frames: Vec::new(),
             vel: [0.0; 3],
             aiclass: None,
@@ -13707,6 +13699,50 @@ mod tests {
         let rt = Runtime::new(&level);
         assert_eq!(rt.things[0].flags, 0x100, "the template's thingflags never reached the runtime word");
         assert_eq!(rt.things[1].flags, 0x4, "the placement word did not replace the template's");
+    }
+
+    #[test]
+    fn type_flag_aliases_share_instances_and_validate_types() {
+        let mut rt = door_runtime();
+        let aliases = ["type", "actor", "weapon", "explosion", "item", "particle"];
+        for (n, alias) in aliases.iter().enumerate() {
+            rt.call(&format!("set{alias}flags"), &[Value::Num(0.0), Value::Num((1 << n) as f64)]);
+        }
+        for alias in aliases {
+            assert_eq!(rt.call(&format!("get{alias}flags"), &[Value::Num(0.0)]), Value::Num(63.0));
+            rt.call(&format!("clear{alias}flags"), &[Value::Num(0.0), Value::Num(1.0)]);
+            assert_eq!(rt.call("GetTypeFlags", &[Value::Num(0.0)]), Value::Num(62.0));
+            rt.call("SetTypeFlags", &[Value::Num(0.0), Value::Num(1.0)]);
+        }
+        for kind in [2, 3, 5, 6, 10, 11] {
+            rt.types[0] = kind;
+            assert_eq!(rt.call("GetTypeFlags", &[Value::Num(0.0)]), Value::Num(63.0));
+        }
+        rt.types[0] = 4;
+        rt.call("SetTypeFlags", &[Value::Num(0.0), Value::Num(128.0)]);
+        assert_eq!(rt.call("GetActorFlags", &[Value::Num(0.0)]), Value::Num(-1.0));
+        assert_eq!(rt.call("GetTypeFlags", &[Value::Num(-1.0)]), Value::Num(-1.0));
+        assert_eq!(rt.things[0].type_flags, 63);
+    }
+
+    #[test]
+    fn type_flags_inherit_and_placement_can_override_with_zero() {
+        let mut level = Level::default();
+        level.templates.push(crate::jkl::Template {
+            name: "base".into(), base: None, model3d: None, sprite: None,
+            params: vec![("type".into(), "item".into()), ("typeflags".into(), "0x80".into())],
+        });
+        level.templates.push(crate::jkl::Template {
+            name: "child".into(), base: Some("base".into()), model3d: None, sprite: None, params: vec![],
+        });
+        let placement = |type_flags| crate::jkl::Thing {
+            template: "child".into(), pos: [0.0; 3], pitch: 0.0, yaw: 0.0, roll: 0.0,
+            sector: 0, flags: 0, type_flags, frames: vec![], vel: [0.0; 3], aiclass: None,
+        };
+        level.things.extend([placement(None), placement(Some(0))]);
+        let rt = Runtime::new(&level);
+        assert_eq!(rt.things[0].type_flags, 0x80);
+        assert_eq!(rt.things[1].type_flags, 0);
     }
 
     /// `AiGetMode` is the AI's own flag word (`ai + 8`), and the flag-word split keeps it apart from
@@ -14014,6 +14050,7 @@ mod tests {
                 head_pitch: 0.0,
                 sector: 7,
                 flags: 0,
+                type_flags: 0,
                 health: 100.0,
                 frame: 0.0,
                 target: None,
@@ -14680,7 +14717,7 @@ mod tests {
         let mut rt = arm_runtime();
         rt.types[1] = 3;
         rt.templates[1] = "alarm".into();
-        rt.template_typeflags.insert("alarm".into(), 0x40000);
+        rt.things[1].type_flags = 0x40000;
         rt.things[1].pos = [1.0, 2.0, 3.0];
         rt.things[1].sector = 0;
         rt.sector_adjoins = vec![vec![]];
@@ -14696,15 +14733,15 @@ mod tests {
             rt.step(None, 0.1);
             assert!(!rt.sector_awareness.contains_key(&(0, 2)));
         }
-        rt.template_typeflags.insert("alarm".into(), 0x42000);
+        rt.things[1].type_flags = 0x42000;
         rt.step(None, 0.1);
         assert!(!rt.sector_awareness.contains_key(&(0, 2)));
-        rt.template_typeflags.insert("alarm".into(), 0x50000);
+        rt.things[1].type_flags = 0x50000;
         for _ in 0..8 {
             rt.step(None, 0.1);
         }
         assert!(!rt.sector_awareness.contains_key(&(0, 2)));
-        rt.template_typeflags.insert("alarm".into(), 0);
+        rt.things[1].type_flags = 0;
         for _ in 0..8 {
             rt.step(None, 0.1);
         }
@@ -14719,7 +14756,7 @@ mod tests {
         rt.template_damage.insert(bolt.clone(), 30.0);
         rt.template_min_damage.insert(bolt.clone(), 10.0);
         rt.template_rate.insert(bolt.clone(), 15.0);
-        rt.template_decay.insert(bolt.clone());
+        rt.template_typeflags.insert(bolt.clone(), 0x4000);
         let shot = rt.fire(0, &bolt).expect("projectile");
         assert_eq!(rt.things[shot].damage, 30.0);
         // `sithWeapon_Update`: damage -= rate * dt, floored at mindamage.
@@ -14729,10 +14766,16 @@ mod tests {
         rt.step(None, 10.0);
         assert_eq!(rt.things[shot].damage, 10.0);
         // A weapon without the decay flag keeps its damage.
-        rt.template_decay.remove(&bolt);
+        rt.template_typeflags.insert(bolt.clone(), 0);
         let steady = rt.fire(0, &bolt).expect("projectile");
         rt.step(None, 5.0);
         assert_eq!(rt.things[steady].damage, 30.0);
+        rt.call("SetWeaponFlags", &[Value::Num(steady as f64), Value::Num(0x4000 as f64)]);
+        rt.step(None, 0.5);
+        assert_eq!(rt.things[steady].damage, 22.5);
+        rt.call("ClearActorFlags", &[Value::Num(steady as f64), Value::Num(0x4000 as f64)]);
+        rt.step(None, 0.5);
+        assert_eq!(rt.things[steady].damage, 22.5);
     }
 
     /// A shot flies along the shooter's orientation, not just its yaw: `sithWeapon_FireProjectile`
@@ -15041,7 +15084,7 @@ mod tests {
         assert!((hits[1].5 - 11.3).abs() < 1e-3, "shields lost {}", hits[1].5);
 
         // A hit the player's invulnerability refuses is not a landed hit and writes no row.
-        rt.actor_flags.insert(0, AF_INVULNERABLE);
+        rt.things[0].type_flags = AF_INVULNERABLE;
         rt.damage_player(20.0, DAMAGE_ENERGY);
         assert_eq!(rt.encounter_events.len(), 2, "an ignored hit must not be recorded");
     }
@@ -17441,12 +17484,12 @@ mod tests {
         assert_eq!(rt.things[1].health, 99.0, "actor-on-actor damage was not scaled to a tenth");
 
         // 0x1000000 on the attacker exempts the scale.
-        rt.actor_flags.insert(2, AF_ACTOR_FULL_DAMAGE);
+        rt.things[2].type_flags = AF_ACTOR_FULL_DAMAGE;
         rt.damage_typed_from(1, 10.0, DAMAGE_IMPACT, 2);
         assert_eq!(rt.things[1].health, 89.0, "the full-damage flag was ignored");
 
         // Falls and drowning are exempt: the same hit unscaled.
-        rt.actor_flags.insert(2, 0);
+        rt.things[2].type_flags = 0;
         rt.damage_typed_from(1, 2.0, DAMAGE_FALL, 2);
         assert_eq!(rt.things[1].health, 87.0, "a fall from an actor was scaled");
         rt.damage_typed_from(1, 2.0, 0x20, 2);
@@ -17686,6 +17729,7 @@ mod tests {
             roll: 0.0,
             sector: 0,
             flags: 0,
+            type_flags: None,
             frames: Vec::new(),
             vel: [0.0; 3],
             aiclass: None,
@@ -17716,6 +17760,7 @@ mod tests {
             roll: 0.0,
             sector: 0,
             flags: 0,
+            type_flags: None,
             frames: Vec::new(),
             vel: [0.0; 3],
             aiclass: None,
@@ -17912,6 +17957,7 @@ mod tests {
             roll: 0.0,
             sector: 0,
             flags: 0,
+            type_flags: None,
             frames: Vec::new(),
             vel: [0.0; 3],
             aiclass: None,
@@ -19916,7 +19962,7 @@ mod tests {
 
         let weapon = expire(3, &|rt| {
             rt.templates[1] = "+grenade".into();
-            rt.template_typeflags.insert("+grenade".into(), 0x100);
+            rt.things[1].type_flags = 0x100;
             rt.template_explode.insert("+grenade".into(), "+boom".into());
         });
         assert_eq!(weapon.things.len(), 3, "the expired grenade left no explosion");
@@ -20514,8 +20560,7 @@ mod tests {
         );
         // The engine tests the **actor word** (`thing + 0x130`, `puVar1[0x4c] & 0x20000`), not
         // the thing's own flags.
-        rt.actor_flags
-            .insert(1, rt.actor_flags.get(&1).copied().unwrap_or(0) | 0x20000);
+        rt.things[1].type_flags |= 0x20000;
         rt.ai_tick(0, 0.1);
         assert_eq!(rt.shots_fired, 0, "the puppet actor fired inline");
         assert!(rt.ai_deferred_fire.contains_key(&1), "the shot was not stored");
