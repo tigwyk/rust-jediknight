@@ -8202,3 +8202,11 @@ the last valid placement `typeflags` replacement. The runtime applies them only 
 after copying the template word. The focused regression covers argument order, explicit zero,
 invalid replacements, and actor isolation. Placement effect values and BKSV flag persistence
 remain unsupported.
+
+## #128: type flags in savegames
+
+`sithGamesave_SaveCurrentWorld` (`0x4da770`) calls `sithDSSThing_FullDescription` (`0x4f4210`),
+which serializes the type word for actor, weapon, explosion, corpse, and player things. BKSV saves
+now append those flags in a tagged extension, while older saves retain each level's loaded word.
+The focused tests cover nonzero and cleared flags, legacy saves, excluded thing types, and
+truncated extensions.

@@ -3459,7 +3459,8 @@ The Cog type, actor, weapon, explosion, item, and particle flag verbs address th
 word. Weapon updates use the current value, so scripts can enable or disable decay after spawn.
 Explosion templates and placements also derive flag bits from `damage`, `blasttime`, `force`,
 `maxlight`, and `range`, in argument order. Placement type overrides and effect values are not yet
-fully reconstructed, and the current BKSV save format does not persist type flags.
+fully reconstructed. BKSV saves retain type flags for actors, weapons, explosions, corpses, and
+players, matching `sithDSSThing_FullDescription` (`0x4f4210`). Older saves leave the level's flags intact.
 
 **In the window**, left mouse fires and created things are drawn. Three things had to be
 fixed for that to be true, and each was invisible until a screenshot proved it:

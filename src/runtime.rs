@@ -626,6 +626,8 @@ pub struct ThingSave {
     pub sector: i32,
     pub health: f32,
     pub flags: u32,
+    /// Absent for old snapshots and types the engine does not serialize.
+    pub type_flags: Option<u32>,
     pub jk_flags: u32,
     pub destroyed: bool,
     pub frame: f32,
@@ -702,6 +704,17 @@ impl Snapshot {
         for light in &self.sector_light {
             out.extend_from_slice(&light.to_le_bytes());
         }
+        out.extend_from_slice(b"BKT1");
+        out.extend_from_slice(&(self.things.len() as u32).to_le_bytes());
+        for thing in &self.things {
+            match thing.type_flags {
+                Some(flags) => {
+                    out.push(1);
+                    out.extend_from_slice(&flags.to_le_bytes());
+                }
+                None => out.push(0),
+            }
+        }
         out
     }
 
@@ -719,6 +732,7 @@ impl Snapshot {
                 health: at.f32()?,
                 sector: at.i32()?,
                 flags: at.u32()?,
+                type_flags: None,
                 jk_flags: at.u32()?,
                 destroyed: at.u8()? != 0,
                 frame: at.f32()?,
@@ -747,6 +761,23 @@ impl Snapshot {
         }
         for _ in 0..at.u32()? {
             save.sector_light.push(at.f32()?);
+        }
+        let remaining = &data[at.at..];
+        if !remaining.is_empty() && b"BKT1".starts_with(remaining) {
+            return None;
+        }
+        if remaining.starts_with(b"BKT1") {
+            at.take(4)?;
+            if at.u32()? as usize != save.things.len() {
+                return None;
+            }
+            for thing in &mut save.things {
+                thing.type_flags = match at.u8()? {
+                    0 => None,
+                    1 => Some(at.u32()?),
+                    _ => return None,
+                };
+            }
         }
         Some(save)
     }
@@ -10770,6 +10801,7 @@ impl Runtime {
 
     /// Everything a savegame has to put back: the things, what the player carries, the clock and the
     /// sector state.
+    /// Type flag inclusion follows `sithDSSThing_FullDescription` (`0x4f4210`).
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
             time: self.time,
@@ -10784,6 +10816,8 @@ impl Runtime {
                     sector: thing.sector,
                     health: thing.health,
                     flags: thing.flags,
+                    type_flags: matches!(self.types.get(index), Some(2 | 3 | 6 | 9 | 10))
+                        .then_some(thing.type_flags),
                     jk_flags: thing.jk_flags,
                     destroyed: thing.destroyed,
                     frame: thing.frame,
@@ -10813,6 +10847,9 @@ impl Runtime {
             thing.sector = saved.sector;
             thing.health = saved.health;
             thing.flags = saved.flags;
+            if let Some(type_flags) = saved.type_flags {
+                thing.type_flags = type_flags;
+            }
             thing.jk_flags = saved.jk_flags;
             thing.destroyed = saved.destroyed;
             thing.next_touch_ms = 0;
@@ -15626,6 +15663,7 @@ mod tests {
         rt.things[0].health = 17.0;
         rt.things[0].destroyed = true;
         rt.things[0].jk_flags = 3;
+        rt.things[0].type_flags = 0x80000008;
         let save = rt.snapshot();
         let bytes = save.to_bytes();
         let back = Snapshot::from_bytes(&bytes).expect("the snapshot did not parse");
@@ -15641,7 +15679,39 @@ mod tests {
         assert_eq!(fresh.time, 42.5);
         assert_eq!(fresh.things[0].pos, [1.5, -2.5, 3.5]);
         assert_eq!(fresh.things[0].jk_flags, 3);
+        assert_eq!(fresh.things[0].type_flags, 0x80000008);
         assert_eq!(fresh.inv.get(&2).copied(), Some(3.0));
+    }
+
+    #[test]
+    fn type_flags_survive_saves_and_old_saves_keep_level_defaults() {
+        let rt = door_runtime();
+        let bytes = rt.snapshot().to_bytes();
+        let extension_start = bytes.len() - 13;
+        assert_eq!(&bytes[extension_start..extension_start + 4], b"BKT1");
+
+        let current = Snapshot::from_bytes(&bytes).unwrap();
+        let mut restored = door_runtime();
+        restored.things[0].type_flags = 0x80;
+        restored.restore(&current);
+        assert_eq!(restored.things[0].type_flags, 0);
+
+        let old = Snapshot::from_bytes(&bytes[..extension_start]).unwrap();
+        restored.things[0].type_flags = 0x80;
+        restored.restore(&old);
+        assert_eq!(restored.things[0].type_flags, 0x80);
+
+        let mut item = door_runtime();
+        item.types[0] = 5;
+        item.things[0].type_flags = 0x20;
+        let item_save = Snapshot::from_bytes(&item.snapshot().to_bytes()).unwrap();
+        item.things[0].type_flags = 0x80;
+        item.restore(&item_save);
+        assert_eq!(item.things[0].type_flags, 0x80);
+
+        for end in extension_start + 1..bytes.len() {
+            assert!(Snapshot::from_bytes(&bytes[..end]).is_none(), "accepted truncated extension at {end}");
+        }
     }
 
     #[test]
