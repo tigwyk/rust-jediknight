@@ -8223,3 +8223,9 @@ The `SetFireWait` (`0x507930`) and `SetMountWait` (`0x507980`) Cog entry points 
 local player and waits of at least -1 second. `sithWeapon_SetFireWait` (`0x4d5480`) clears its
 wait only for exactly -1; other accepted negative values are stored. The regression covers another
 player, a rejected wait, and the accepted negative boundaries.
+
+## #134: change fire rate
+
+`FUN_00507df0` (`0x507df0`) accepts `ChangeFireRate` only for the local player and a positive rate.
+`sithWeapon_SetFireRate` (`0x4d6830`) stores that interval without moving the current deadline.
+The port applies the accepted rate to both projectile and weapon-Cog firing paths.

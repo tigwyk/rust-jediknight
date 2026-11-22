@@ -12535,10 +12535,16 @@ impl Runtime {
                 self.weapon_cog = None;
                 Value::Nil
             }
+            // `FUN_00507df0` and `sithWeapon_SetFireRate` (`0x4d6830`) change the local
+            // player's interval only when it is positive, without changing the current deadline.
             "changefirerate" => {
-                self.weapon_rate = num(1) as f32;
-                if let Some((_, rate, mode)) = self.weapon_cog {
-                    self.weapon_cog = Some((self.weapon_cog.map(|c| c.0).unwrap_or(-1), rate, mode));
+                let rate = num(1) as f32;
+                if self.local_player() == Some(ti(0)) && rate > 0.0 {
+                    self.weapon_rate = rate;
+                    self.fire_wait = rate;
+                    if let Some((_, interval, _)) = &mut self.weapon_cog {
+                        *interval = rate;
+                    }
                 }
                 Value::Nil
             }
@@ -15838,6 +15844,32 @@ mod tests {
         assert_eq!(rt.call("IsThingVisible", &[t.clone()]), Value::Num(1.0));
         rt.call("DestroyThing", &[t.clone()]);
         assert_eq!(rt.call("IsThingVisible", &[t]), Value::Num(0.0));
+    }
+
+    #[test]
+    fn change_fire_rate_updates_weapon_cadence_for_local_player() {
+        let mut rt = door_runtime();
+        rt.things.push(rt.things[0].clone());
+        rt.templates.push("remoteplayer".into());
+        rt.types.push(10);
+        rt.weapon_cog = Some((3, 1.0, 0));
+        rt.weapon_ready = 11.0;
+        rt.time = 10.0;
+        rt.call("ChangeFireRate", &[Value::Num(0.0), Value::Num(0.25)]);
+        rt.call("ChangeFireRate", &[Value::Num(1.0), Value::Num(4.0)]);
+        rt.call("ChangeFireRate", &[Value::Num(0.0), Value::Num(0.0)]);
+        rt.call("ChangeFireRate", &[Value::Num(0.0), Value::Num(-1.0)]);
+        assert!(!rt.try_fire_weapon(0));
+        rt.time = 11.0;
+        assert!(rt.try_fire_weapon(0));
+        rt.time = 11.125;
+        assert!(!rt.try_fire_weapon(0));
+        rt.time = 11.25;
+        assert!(rt.try_fire_weapon(0));
+
+        rt.time = 20.0;
+        assert!(rt.player_fire(0, "+bryarbolt").is_some());
+        assert_eq!(rt.next_fire, 20.25);
     }
 
     #[test]
