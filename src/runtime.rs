@@ -1777,7 +1777,7 @@ pub struct Runtime {
     /// The millisecond game clock (`0x836c14`) sampled by the item collision handler.
     game_clock: std::time::Duration,
     /// `SetFireWait`: the player's weapon cooldown, and the level time the next shot is allowed at.
-    /// `sithWeapon_SetFireWait` arms `nextFire = now + wait`, and a negative wait clears both.
+    /// `sithWeapon_SetFireWait` arms `nextFire = now + wait`, and exactly -1 clears both.
     pub fire_wait: f32,
     pub next_fire: f32,
     /// `SetMasterCog`/`GetMasterCog`: the engine keeps one global master cog index
@@ -12084,16 +12084,16 @@ impl Runtime {
                 Value::Nil
             }
             // The engine's arm only forwards to `sithWeapon_SetFireWait` when the thing is the
-            // player (`FUN_00507930`), which is what keeps a scripted wait from arming everyone's
-            // weapon. The negative case is the engine's own "clear" branch.
+            // local player (`FUN_00507930`), which is what keeps a scripted wait from arming everyone's
+            // weapon. Waits below -1 are rejected; exactly -1 is the engine's own "clear" branch.
             "setfirewait" => {
-                if self.types.get(ti(0)).copied() == Some(10) {
+                let wait = num(1) as f32;
+                if self.local_player() == Some(ti(0)) && wait >= -1.0 {
                     // A trigger event as well as a cadence: a **saber**'s `fire:` has no projectile to
                     // spawn, it swings and calls `SetFireWait` (11gorc is the saber level), so a check
                     // that counts only projectiles calls a working trigger broken there.
                     self.shots_fired += 1;
-                    let wait = num(1) as f32;
-                    if wait < 0.0 {
+                    if wait == -1.0 {
                         self.fire_wait = -1.0;
                         self.next_fire = -1.0;
                     } else {
@@ -12175,7 +12175,10 @@ impl Runtime {
                 // `sithWeapon_SetMountWait` stores `secWait + gameTime` in one global, and the fire path
                 // refuses until that clock passes. `SetMountWait(player, 0)` — what every shipped
                 // `endlevel.cog` startup calls — therefore cancels the wait instead of imposing one.
-                self.mount_wait_until = self.time + num(1) as f32;
+                let wait = num(1) as f32;
+                if self.local_player() == Some(ti(0)) && wait >= -1.0 {
+                    self.mount_wait_until = self.time + wait;
+                }
                 Value::Nil
             }
             // `PlayKey(thing, key, flags, frame)` — `sithPuppet_PlayKey` swaps a puppet's animation for
@@ -15835,6 +15838,32 @@ mod tests {
         assert_eq!(rt.call("IsThingVisible", &[t.clone()]), Value::Num(1.0));
         rt.call("DestroyThing", &[t.clone()]);
         assert_eq!(rt.call("IsThingVisible", &[t]), Value::Num(0.0));
+    }
+
+    #[test]
+    fn weapon_wait_verbs_accept_only_local_player_and_valid_waits() {
+        let mut rt = door_runtime();
+        rt.things.push(rt.things[0].clone());
+        rt.templates.push("remoteplayer".into());
+        rt.types.push(10);
+        rt.time = 5.0;
+        let player = Value::Num(0.0);
+        let remote = Value::Num(1.0);
+        for verb in ["SetFireWait", "SetMountWait"] {
+            rt.call(verb, &[player.clone(), Value::Num(2.0)]);
+            rt.call(verb, &[remote.clone(), Value::Num(8.0)]);
+            rt.call(verb, &[player.clone(), Value::Num(-2.0)]);
+        }
+        assert_eq!(rt.next_fire, 7.0);
+        assert_eq!(rt.mount_wait_until, 7.0);
+
+        rt.call("SetFireWait", &[player.clone(), Value::Num(-0.5)]);
+        assert_eq!(rt.fire_wait, -0.5);
+        assert_eq!(rt.next_fire, 4.5);
+        rt.call("SetMountWait", &[player.clone(), Value::Num(-1.0)]);
+        assert_eq!(rt.mount_wait_until, 4.0);
+        rt.call("SetFireWait", &[player, Value::Num(-1.0)]);
+        assert_eq!((rt.fire_wait, rt.next_fire), (-1.0, -1.0));
     }
 
     #[test]

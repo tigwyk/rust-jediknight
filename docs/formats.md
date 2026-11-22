@@ -814,6 +814,9 @@ exercises a non-zero wait:
   mount wait: refused at t=100 for a 1 s wait, fired at t=102 (deadline 101)
 ```
 
+The Cog entry points accept only the local player and waits of at least -1 second.
+For `SetFireWait`, exactly -1 clears the fire wait; other accepted values set it.
+
 **`PlayKey` swaps a puppet's animation for one of the script's own keyframe symbols.**
 `PlayKey(thing, key, flags, frame)` is `sithPuppet_PlayKey`: the thing's puppet stops playing its
 `.pup` state track (`stand`, `death`) and plays the `.key` the script names instead, from the frame it
