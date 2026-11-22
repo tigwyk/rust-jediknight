@@ -8176,3 +8176,12 @@ line. No oracle moves.
 The port now applies that gate to the player motion callback as well as the per-thing arms.
 The focused regression covers the lifetime countdown and expiry, re-enabling an actor, and
 suppression and resumption of player motion.
+
+## #120: weapon awareness cadence
+
+`sithWeapon_Update` (`0x4d3530`) tests the weapon's own type flags. After the special impact
+and beam arms, flag `0x40000` emits a kind-2, strength-2 awareness event from the weapon when
+`(thing index + DAT_008ee640) & 7` is zero. `sithUpdate` (`0x4c4c00`) increments that wrapping
+frame counter before the thing pass. This replaces the AI shot-based kind-2 approximation.
+The impact and beam collision chains remain unported, and awareness still uses the port's
+immediate delivery instead of the engine's event queue.
