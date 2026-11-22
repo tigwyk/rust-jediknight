@@ -3426,12 +3426,15 @@ The engine's `sithWeapon_Update` decays a projectile's damage as it flies, when 
 typeflags carry **`SITH_WF_DAMAGE_DECAY` = 0x4000**:
 
 ```c
-flex_t v3 = pThing->weaponParams.damage - pThing->weaponParams.rate * secDeltaTime;
-if (v3 <= 0.0) v3 = pThing->weaponParams.minDamage;
-pThing->weaponParams.damage = v3;
+if (pThing->weaponParams.damage > pThing->weaponParams.minDamage) {
+    flex_t v3 = pThing->weaponParams.damage - pThing->weaponParams.rate * secDeltaTime;
+    if (v3 <= pThing->weaponParams.minDamage) v3 = pThing->weaponParams.minDamage;
+    pThing->weaponParams.damage = v3;
+}
 ```
 
 `rate` here is damage **per second**, not a distance ramp, and the floor is `mindamage=`.
+A negative rate increases damage; the engine does not require the rate to be positive.
 Level 1's own bolt:
 
 ```text
