@@ -8185,3 +8185,12 @@ and beam arms, flag `0x40000` emits a kind-2, strength-2 awareness event from th
 frame counter before the thing pass. This replaces the AI shot-based kind-2 approximation.
 The impact and beam collision chains remain unported, and awareness still uses the port's
 immediate delivery instead of the engine's event queue.
+
+## #124: explosion template flag initialization
+
+`sithTemplate_Parse` (`0x4ddf30`) copies the parent before parsing each template's arguments.
+`sithExplosion_ParseArg` (`0x4fbbd0`) replaces the type word for `typeflags`, ORs `0x6` for
+`damage`, `0x2` for `blasttime`, `force`, and `range`, and `0x10` for `maxlight`. The runtime
+now applies those operations in inherited argument order before copying the word to each thing.
+The focused regression covers inheritance, ordering, replacement, and all five flag-setting keys.
+Placement-level effect arguments and BKSV persistence remain unsupported.
