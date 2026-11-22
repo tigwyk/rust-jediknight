@@ -18476,14 +18476,8 @@ mod tests {
         }
         assert!(rt.shots_fired > 0, "the turret never fired");
         assert_eq!(rt.things[1].pos, emplaced, "the turret walked");
-        // Both awareness kinds a weapon raises: the shot (1) and the weapon's own firing state (2),
-        // which `listen` scans first.
-        for kind in [1u8, 2] {
-            assert!(
-                rt.sector_awareness.contains_key(&(7, kind)),
-                "firing raised no kind-{kind} awareness record"
-            );
-        }
+        // The shot raises kind 1; kind 2 belongs to a flagged weapon's own update.
+        assert!(rt.sector_awareness.contains_key(&(7, 1)), "firing raised no kind-1 awareness record");
     }
 
     /// `turretfire`'s **damaged** arm (`FUN_0050a0f0`): below `arg5` (0.20) of full health the handler
