@@ -13752,12 +13752,12 @@ mod tests {
     #[test]
     fn ai_get_mode_reads_the_script_word() {
         let mut rt = door_runtime();
-        rt.call("aisetmode", &[Value::Num(1.0), Value::Num(0x800 as f64)]);
-        assert_eq!(rt.call("aigetmode", &[Value::Num(1.0)]).num(), 0x800 as f64);
-        assert_eq!(rt.call("getactorflags", &[Value::Num(1.0)]).num(), 0.0);
-        rt.call("setactorflags", &[Value::Num(1.0), Value::Num(0x8 as f64)]);
-        assert_eq!(rt.call("aigetmode", &[Value::Num(1.0)]).num(), 0x800 as f64);
-        assert_eq!(rt.call("getactorflags", &[Value::Num(1.0)]).num(), 0x8 as f64);
+        rt.call("aisetmode", &[Value::Num(0.0), Value::Num(0x800 as f64)]);
+        assert_eq!(rt.call("aigetmode", &[Value::Num(0.0)]).num(), 0x800 as f64);
+        assert_eq!(rt.call("getactorflags", &[Value::Num(0.0)]).num(), 0.0);
+        rt.call("setactorflags", &[Value::Num(0.0), Value::Num(0x8 as f64)]);
+        assert_eq!(rt.call("aigetmode", &[Value::Num(0.0)]).num(), 0x800 as f64);
+        assert_eq!(rt.call("getactorflags", &[Value::Num(0.0)]).num(), 0x8 as f64);
     }
 
     /// `sithAI_InstinctUpdate` (`0x4e9e90`) arms a due instinct at `now + 1000` before calling it,
