@@ -3548,8 +3548,9 @@ impl Runtime {
         if flags & 0x12000 != 0 {
             return;
         }
-        if flags & 0x4000 != 0 && thing.decay > 0.0 && thing.damage > thing.min_damage {
-            thing.damage = (thing.damage - thing.decay * dt).max(thing.min_damage);
+        if flags & 0x4000 != 0 && thing.damage > thing.min_damage {
+            let damage = thing.damage - thing.decay * dt;
+            thing.damage = if damage <= thing.min_damage { thing.min_damage } else { damage };
         }
         // shortcut: awareness is delivered immediately; upgrade when the engine event queue is ported.
         if flags & 0x40000 != 0 && (index as u32).wrapping_add(self.update_frame) & 7 == 0 {
@@ -14903,6 +14904,28 @@ mod tests {
         rt.call("ClearActorFlags", &[Value::Num(steady as f64), Value::Num(0x4000 as f64)]);
         rt.step(None, 0.5);
         assert_eq!(rt.things[steady].damage, 22.5);
+    }
+
+    #[test]
+    fn weapon_damage_rate_can_be_negative_or_zero() {
+        let mut rt = door_runtime();
+        let bolt = "+rate".to_string();
+        rt.template_damage.insert(bolt.clone(), 30.0);
+        rt.template_min_damage.insert(bolt.clone(), 10.0);
+        rt.template_rate.insert(bolt.clone(), -2.0);
+        rt.template_typeflags.insert(bolt.clone(), 0x4000);
+        let shot = rt.fire(0, &bolt).unwrap();
+        rt.step(None, 2.0);
+        assert_eq!(rt.things[shot].damage, 34.0);
+
+        rt.things[shot].damage = 9.0;
+        rt.step(None, 2.0);
+        assert_eq!(rt.things[shot].damage, 9.0);
+
+        rt.things[shot].damage = 30.0;
+        rt.things[shot].decay = 0.0;
+        rt.step(None, 2.0);
+        assert_eq!(rt.things[shot].damage, 30.0);
     }
 
     /// A shot flies along the shooter's orientation, not just its yaw: `sithWeapon_FireProjectile`

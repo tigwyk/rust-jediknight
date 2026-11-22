@@ -8210,3 +8210,9 @@ which serializes the type word for actor, weapon, explosion, corpse, and player 
 now append those flags in a tagged extension, while older saves retain each level's loaded word.
 The focused tests cover nonzero and cleared flags, legacy saves, excluded thing types, and
 truncated extensions.
+
+## #130: weapon damage rate edge cases
+
+`sithWeapon_Update` (`0x4d3530`) applies the weapon's rate whenever its decay flag is set and
+damage exceeds the minimum. A negative rate increases damage; zero leaves it unchanged. The
+explicit minimum comparison also retains the engine's floating-point comparison behavior.
