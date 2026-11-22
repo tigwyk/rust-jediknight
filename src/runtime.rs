@@ -593,16 +593,7 @@ fn explosion_template_typeflags(level: &Level, name: &str) -> u32 {
                     flags = parsed;
                 }
             } else if kind == 6 {
-                if key.eq_ignore_ascii_case("damage") {
-                    flags |= 6;
-                } else if key.eq_ignore_ascii_case("blasttime")
-                    || key.eq_ignore_ascii_case("force")
-                    || key.eq_ignore_ascii_case("range")
-                {
-                    flags |= 2;
-                } else if key.eq_ignore_ascii_case("maxlight") {
-                    flags |= 0x10;
-                }
+                flags |= crate::jkl::explosion_argument_flags(key);
             }
         }
     }
@@ -2386,7 +2377,13 @@ impl Runtime {
                             .unwrap_or(0)
                     },
                     type_flags: if excluded[index] { 0 } else {
-                        t.type_flags.unwrap_or_else(|| template_typeflags.get(&t.template.to_ascii_lowercase()).copied().unwrap_or(0))
+                        let name = t.template.to_ascii_lowercase();
+                        let flags = t.type_flags.unwrap_or_else(|| template_typeflags.get(&name).copied().unwrap_or(0));
+                        if template_types.get(&name) == Some(&6) {
+                            flags | t.explosion_type_flags
+                        } else {
+                            flags
+                        }
                     },
                     health: if excluded[index] {
                         0.0
@@ -13640,6 +13637,7 @@ mod tests {
             sector: 0,
             flags,
             type_flags: None,
+            explosion_type_flags: 0,
             frames: Vec::new(),
             vel: [0.0; 3],
             aiclass: None,
@@ -13732,6 +13730,7 @@ mod tests {
             sector: 0,
             flags,
             type_flags: None,
+            explosion_type_flags: 0,
             frames: Vec::new(),
             vel: [0.0; 3],
             aiclass: None,
@@ -13781,7 +13780,7 @@ mod tests {
         });
         let placement = |type_flags| crate::jkl::Thing {
             template: "child".into(), pos: [0.0; 3], pitch: 0.0, yaw: 0.0, roll: 0.0,
-            sector: 0, flags: 0, type_flags, frames: vec![], vel: [0.0; 3], aiclass: None,
+            sector: 0, flags: 0, type_flags, explosion_type_flags: 0, frames: vec![], vel: [0.0; 3], aiclass: None,
         };
         level.things.extend([placement(None), placement(Some(0))]);
         let rt = Runtime::new(&level);
@@ -13806,12 +13805,33 @@ mod tests {
         for name in ["base", "light", "reset", "overwrite", "blasttime", "force", "range"] {
             level.things.push(crate::jkl::Thing {
                 template: name.into(), pos: [0.0; 3], pitch: 0.0, yaw: 0.0, roll: 0.0,
-                sector: 0, flags: 0, type_flags: None, frames: vec![], vel: [0.0; 3], aiclass: None,
+                sector: 0, flags: 0, type_flags: None, explosion_type_flags: 0, frames: vec![], vel: [0.0; 3], aiclass: None,
             });
         }
         let mut rt = Runtime::new(&level);
         for (index, expected) in [0x86, 0x96, 0x42, 0x20, 0x22, 0x22, 0x22].into_iter().enumerate() {
             assert_eq!(rt.call("GetExplosionFlags", &[Value::Num(index as f64)]), Value::Num(expected as f64));
+        }
+    }
+
+    #[test]
+    fn explosion_placement_flags_follow_argument_order_and_type() {
+        let text = "\nWORLD THINGS 5\n\
+            0: boom boom 0 0 0 0 0 0 0 damage=1\n\
+            1: boom boom 0 0 0 0 0 0 0 maxlight=1 typeflags=0x40 force=1\n\
+            2: boom boom 0 0 0 0 0 0 0 typeflags=0 maxlight=1\n\
+            3: boom boom 0 0 0 0 0 0 0 range=1 typeflags=bad!\n\
+            4: actor actor 0 0 0 0 0 0 0 damage=1 maxlight=1\n";
+        let mut level = crate::jkl::parse(text);
+        for (name, kind) in [("boom", "explosion"), ("actor", "actor")] {
+            level.templates.push(crate::jkl::Template {
+                name: name.into(), base: None, model3d: None, sprite: None,
+                params: vec![("type".into(), kind.into()), ("typeflags".into(), "0x80".into())],
+            });
+        }
+        let mut rt = Runtime::new(&level);
+        for (index, expected) in [0x86, 0x42, 0x10, 0x82, 0x80].into_iter().enumerate() {
+            assert_eq!(rt.call("GetTypeFlags", &[Value::Num(index as f64)]), Value::Num(expected as f64));
         }
     }
 
@@ -17800,6 +17820,7 @@ mod tests {
             sector: 0,
             flags: 0,
             type_flags: None,
+            explosion_type_flags: 0,
             frames: Vec::new(),
             vel: [0.0; 3],
             aiclass: None,
@@ -17831,6 +17852,7 @@ mod tests {
             sector: 0,
             flags: 0,
             type_flags: None,
+            explosion_type_flags: 0,
             frames: Vec::new(),
             vel: [0.0; 3],
             aiclass: None,
@@ -18028,6 +18050,7 @@ mod tests {
             sector: 0,
             flags: 0,
             type_flags: None,
+            explosion_type_flags: 0,
             frames: Vec::new(),
             vel: [0.0; 3],
             aiclass: None,

@@ -8194,3 +8194,11 @@ immediate delivery instead of the engine's event queue.
 now applies those operations in inherited argument order before copying the word to each thing.
 The focused regression covers inheritance, ordering, replacement, and all five flag-setting keys.
 Placement-level effect arguments and BKSV persistence remain unsupported.
+
+## #126: explosion placement flag initialization
+
+The placement parser records the `sithExplosion_ParseArg` (`0x4fbbd0`) flag additions after
+the last valid placement `typeflags` replacement. The runtime applies them only to explosions,
+after copying the template word. The focused regression covers argument order, explicit zero,
+invalid replacements, and actor isolation. Placement effect values and BKSV flag persistence
+remain unsupported.
