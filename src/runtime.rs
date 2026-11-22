@@ -1709,6 +1709,8 @@ pub struct Runtime {
     pub bin_due: Vec<(f32, i32, i32, usize, f32)>,
     /// Seconds this world has been stepped, which the hold timers read.
     pub time: f32,
+    /// `sithUpdate`'s wrapping frame counter (`DAT_008ee640`).
+    update_frame: u32,
     /// The millisecond game clock (`0x836c14`) sampled by the item collision handler.
     game_clock: std::time::Duration,
     /// `SetFireWait`: the player's weapon cooldown, and the level time the next shot is allowed at.
@@ -2702,6 +2704,7 @@ impl Runtime {
             bin_due: Vec::new(),
             bin_wait: BTreeMap::new(),
             time: 0.0,
+            update_frame: 0,
             game_clock: std::time::Duration::ZERO,
             fire_wait: 0.0,
             next_fire: 0.0,
@@ -3210,6 +3213,7 @@ impl Runtime {
     /// the camera's shake decay (`sithCamera_Update`, which the engine runs from the render path)
     /// rides here too.
     pub fn sith_update_head(&mut self, dt: f32) {
+        self.update_frame = self.update_frame.wrapping_add(1);
         self.time += dt;
         self.advance_sound_fades(dt);
         // `sithInventory_SendFire`: an active bin with a delay sends its own cog a `fire` every delay,
@@ -3479,13 +3483,23 @@ impl Runtime {
         true
     }
 
-    /// `sithWeapon_Update`'s decay, one step's worth: damage falls by `rate * dt`, floored
-    /// at `mindamage`. A weapon whose typeflags lack `SITH_WF_DAMAGE_DECAY` (0x4000) keeps
-    /// its damage. shortcut: the weapon's own movement arms are not ported.
+    /// `sithWeapon_Update` (`0x4d3530`): damage decay and staggered weapon awareness.
+    /// shortcut: the `0x2000` impact and `0x10000` beam arms need their collision chains.
     fn sith_weapon_update(&mut self, index: usize, dt: f32) {
+        let flags = self.templates.get(index)
+            .and_then(|name| self.template_typeflags.get(name).or_else(|| self.template_typeflags.get(&name.to_ascii_lowercase())))
+            .copied().unwrap_or(0);
+        if flags & 0x12000 != 0 {
+            return;
+        }
         let Some(thing) = self.things.get_mut(index) else { return };
         if thing.decay > 0.0 && thing.damage > thing.min_damage {
             thing.damage = (thing.damage - thing.decay * dt).max(thing.min_damage);
+        }
+        // shortcut: awareness is delivered immediately; upgrade when the engine event queue is ported.
+        if flags & 0x40000 != 0 && (index as u32).wrapping_add(self.update_frame) & 7 == 0 {
+            let (sector, pos) = (thing.sector, thing.pos);
+            self.transmit_awareness(sector, 2, pos, AI_AWARE_WEAPON, Some(index));
         }
     }
 
@@ -7436,11 +7450,6 @@ impl Runtime {
             // raises it — the player has no `.ai` class, and requiring one meant no actor ever heard
             // the player's gunfire.
             self.transmit_awareness(sector, 1, pos, AI_AWARE_SHOT, Some(shooter));
-            // `sithWeapon_Update` (`0x4d3530`) raises kind **2** at strength **2.0**
-            // (`0x40000000`) while the weapon's firing flag (`0x40000`) is up, every eighth engine
-            // tick. The port's shots stand in for that stream — the record is strength-keyed, so the
-            // engine's decimation would only repeat the same value.
-            self.transmit_awareness(sector, 2, pos, AI_AWARE_WEAPON, Some(shooter));
         }
         fired
     }
@@ -14667,6 +14676,42 @@ mod tests {
     }
 
     #[test]
+    fn weapon_awareness_uses_staggered_projectile_ticks() {
+        let mut rt = arm_runtime();
+        rt.types[1] = 3;
+        rt.templates[1] = "alarm".into();
+        rt.template_typeflags.insert("alarm".into(), 0x40000);
+        rt.things[1].pos = [1.0, 2.0, 3.0];
+        rt.things[1].sector = 0;
+        rt.sector_adjoins = vec![vec![]];
+        for _ in 0..6 {
+            rt.step(None, 0.1);
+            assert!(!rt.sector_awareness.contains_key(&(0, 2)));
+        }
+        rt.step(None, 0.1);
+        let event = rt.sector_awareness.get(&(0, 2)).unwrap();
+        assert_eq!((event.0, event.1, event.3), (2.0, [1.0, 2.0, 3.0], Some(1)));
+        rt.sector_awareness.clear();
+        for _ in 0..7 {
+            rt.step(None, 0.1);
+            assert!(!rt.sector_awareness.contains_key(&(0, 2)));
+        }
+        rt.template_typeflags.insert("alarm".into(), 0x42000);
+        rt.step(None, 0.1);
+        assert!(!rt.sector_awareness.contains_key(&(0, 2)));
+        rt.template_typeflags.insert("alarm".into(), 0x50000);
+        for _ in 0..8 {
+            rt.step(None, 0.1);
+        }
+        assert!(!rt.sector_awareness.contains_key(&(0, 2)));
+        rt.template_typeflags.insert("alarm".into(), 0);
+        for _ in 0..8 {
+            rt.step(None, 0.1);
+        }
+        assert!(!rt.sector_awareness.contains_key(&(0, 2)));
+    }
+
+    #[test]
     fn a_projectiles_damage_decays_in_flight() {
         let mut rt = door_runtime();
         let bolt = "+bryarbolt".to_string();
@@ -18431,14 +18476,8 @@ mod tests {
         }
         assert!(rt.shots_fired > 0, "the turret never fired");
         assert_eq!(rt.things[1].pos, emplaced, "the turret walked");
-        // Both awareness kinds a weapon raises: the shot (1) and the weapon's own firing state (2),
-        // which `listen` scans first.
-        for kind in [1u8, 2] {
-            assert!(
-                rt.sector_awareness.contains_key(&(7, kind)),
-                "firing raised no kind-{kind} awareness record"
-            );
-        }
+        // The shot raises kind 1; kind 2 belongs to a flagged weapon's own update.
+        assert!(rt.sector_awareness.contains_key(&(7, 1)), "firing raised no kind-1 awareness record");
     }
 
     /// `turretfire`'s **damaged** arm (`FUN_0050a0f0`): below `arg5` (0.20) of full health the handler
