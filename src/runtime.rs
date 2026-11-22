@@ -569,6 +569,46 @@ fn thing_type(word: Option<&str>) -> i32 {
     }
 }
 
+/// `sithTemplate_Parse` (`0x4ddf30`) and `sithExplosion_ParseArg` (`0x4fbbd0`).
+fn explosion_template_typeflags(level: &Level, name: &str) -> u32 {
+    let mut chain = [None; 8];
+    let mut current = Some(name);
+    for slot in &mut chain {
+        let Some(template) = current.and_then(|name| {
+            level.templates.iter().find(|template| template.name.eq_ignore_ascii_case(name))
+        }) else { break };
+        *slot = Some(template);
+        current = template.base.as_deref();
+    }
+
+    let mut flags = 0;
+    let mut kind = 0;
+    for template in chain.into_iter().rev().flatten() {
+        for (key, value) in &template.params {
+            if key.eq_ignore_ascii_case("type") {
+                kind = thing_type(Some(value));
+            } else if key.eq_ignore_ascii_case("typeflags") && matches!(kind, 2 | 3 | 5 | 6 | 10 | 11) {
+                let value = value.trim();
+                if let Ok(parsed) = u32::from_str_radix(value.trim_start_matches("0x").trim_start_matches("0X"), 16) {
+                    flags = parsed;
+                }
+            } else if kind == 6 {
+                if key.eq_ignore_ascii_case("damage") {
+                    flags |= 6;
+                } else if key.eq_ignore_ascii_case("blasttime")
+                    || key.eq_ignore_ascii_case("force")
+                    || key.eq_ignore_ascii_case("range")
+                {
+                    flags |= 2;
+                } else if key.eq_ignore_ascii_case("maxlight") {
+                    flags |= 0x10;
+                }
+            }
+        }
+    }
+    flags
+}
+
 /// Per-surface state the wall/cel verbs mutate: the texture's current cel, its animation
 /// rate, the offset it has been slid by, and its centre for `SurfaceCenter`.
 #[derive(Clone)]
@@ -2214,13 +2254,17 @@ impl Runtime {
             .templates
             .iter()
             .filter_map(|t| {
+                let name = t.name.to_ascii_lowercase();
+                if template_types.get(&name) == Some(&6) {
+                    return Some((name, explosion_template_typeflags(level, &t.name)));
+                }
                 level
                     .template_param(&t.name, "typeflags")
                     .and_then(|raw| {
                         let raw = raw.trim();
                         u32::from_str_radix(raw.trim_start_matches("0x").trim_start_matches("0X"), 16).ok()
                     })
-                    .map(|flags| (t.name.to_ascii_lowercase(), flags))
+                    .map(|flags| (name, flags))
             })
             .collect();
         // The shipped `_debris` family is `type=weapon physflags=0x201`, yet it is rubble: the mover
@@ -13743,6 +13787,32 @@ mod tests {
         let rt = Runtime::new(&level);
         assert_eq!(rt.things[0].type_flags, 0x80);
         assert_eq!(rt.things[1].type_flags, 0);
+    }
+
+    #[test]
+    fn explosion_template_flags_follow_argument_and_inheritance_order() {
+        let mut level = Level::default();
+        let template = |name: &str, base: Option<&str>, params: &[(&str, &str)]| crate::jkl::Template {
+            name: name.into(), base: base.map(str::to_owned), model3d: None, sprite: None,
+            params: params.iter().map(|(key, value)| ((*key).into(), (*value).into())).collect(),
+        };
+        level.templates.push(template("base", None, &[("type", "explosion"), ("typeflags", "0x80"), ("damage", "10")]));
+        level.templates.push(template("light", Some("base"), &[("maxlight", "1")]));
+        level.templates.push(template("reset", Some("light"), &[("typeflags", "0x40"), ("range", "2")]));
+        level.templates.push(template("overwrite", Some("base"), &[("damage", "1"), ("typeflags", "0x20")]));
+        for key in ["blasttime", "force", "range"] {
+            level.templates.push(template(key, Some("overwrite"), &[(key, "1")]));
+        }
+        for name in ["base", "light", "reset", "overwrite", "blasttime", "force", "range"] {
+            level.things.push(crate::jkl::Thing {
+                template: name.into(), pos: [0.0; 3], pitch: 0.0, yaw: 0.0, roll: 0.0,
+                sector: 0, flags: 0, type_flags: None, frames: vec![], vel: [0.0; 3], aiclass: None,
+            });
+        }
+        let mut rt = Runtime::new(&level);
+        for (index, expected) in [0x86, 0x96, 0x42, 0x20, 0x22, 0x22, 0x22].into_iter().enumerate() {
+            assert_eq!(rt.call("GetExplosionFlags", &[Value::Num(index as f64)]), Value::Num(expected as f64));
+        }
     }
 
     /// `AiGetMode` is the AI's own flag word (`ai + 8`), and the flag-word split keeps it apart from
