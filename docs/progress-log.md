@@ -8216,3 +8216,10 @@ truncated extensions.
 `sithWeapon_Update` (`0x4d3530`) applies the weapon's rate whenever its decay flag is set and
 damage exceeds the minimum. A negative rate increases damage; zero leaves it unchanged. The
 explicit minimum comparison also retains the engine's floating-point comparison behavior.
+
+## #132: weapon wait Cog guards
+
+The `SetFireWait` (`0x507930`) and `SetMountWait` (`0x507980`) Cog entry points accept only the
+local player and waits of at least -1 second. `sithWeapon_SetFireWait` (`0x4d5480`) clears its
+wait only for exactly -1; other accepted negative values are stored. The regression covers another
+player, a rejected wait, and the accepted negative boundaries.
