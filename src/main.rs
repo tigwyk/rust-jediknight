@@ -31323,6 +31323,7 @@ mod registration_tests {
                 sector: 0,
                 flags: 0,
                 type_flags: None,
+                explosion_type_flags: 0,
                 frames: Vec::new(),
                 vel: [0.0; 3],
                 aiclass: None,
@@ -31523,7 +31524,7 @@ mod registration_tests {
             ],
         });
         level.things.push(jkl::Thing {
-            template: "walkplayer".into(), pos: [0.0; 3], sector: 0, flags: 0, type_flags: None,
+            template: "walkplayer".into(), pos: [0.0; 3], sector: 0, flags: 0, type_flags: None, explosion_type_flags: 0,
             pitch: 0.0, yaw: 0.0, roll: 0.0, frames: Vec::new(), vel: [0.0; 3], aiclass: None,
         });
         let verts = vec![[-10.0, 0.0, -10.0], [10.0, 0.0, -10.0], [10.0, 0.0, 10.0], [-10.0, 0.0, 10.0]];
@@ -31594,7 +31595,7 @@ mod registration_tests {
                     ("collide".into(), "1".into())],
             });
             level.things.push(jkl::Thing {
-                template: name.into(), pos, sector: 0, flags: 0, type_flags: None,
+                template: name.into(), pos, sector: 0, flags: 0, type_flags: None, explosion_type_flags: 0,
                 pitch: 0.0, yaw: 0.0, roll: 0.0, frames: Vec::new(), vel: [0.0; 3], aiclass: None,
             });
         }
@@ -31863,6 +31864,7 @@ mod walker_tests {
             sector: 0,
             flags: 0,
             type_flags: None,
+            explosion_type_flags: 0,
             frames: Vec::new(),
             vel: [0.0; 3],
             aiclass: None,

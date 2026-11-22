@@ -182,6 +182,8 @@ pub struct Thing {
     pub flags: u32,
     /// Placement `typeflags=` override; `None` retains the inherited template word.
     pub type_flags: Option<u32>,
+    /// Explosion flag bits added by placement arguments after the last `typeflags=` override.
+    pub explosion_type_flags: u32,
     /// `frame=(x/y/z:pitch/yaw/roll)…` — the thing's keyframe path, written straight
     /// into the level. Doors and lifts are exactly these lists: `MoveToFrame`
     /// interpolates them, and frame 0 is the position above. `.key` files are for
@@ -655,6 +657,22 @@ fn parse_surface_normal(line: &str) -> Option<(usize, [f32; 3])> {
     Some((idx, [f[1].parse().ok()?, f[2].parse().ok()?, f[3].parse().ok()?]))
 }
 
+/// `sithExplosion_ParseArg` (`0x4fbbd0`): flags added by an explosion argument.
+pub(crate) fn explosion_argument_flags(key: &str) -> u32 {
+    if key.eq_ignore_ascii_case("damage") {
+        6
+    } else if key.eq_ignore_ascii_case("blasttime")
+        || key.eq_ignore_ascii_case("force")
+        || key.eq_ignore_ascii_case("range")
+    {
+        2
+    } else if key.eq_ignore_ascii_case("maxlight") {
+        0x10
+    } else {
+        0
+    }
+}
+
 /// `num: template name X Y Z Pitch Yaw Roll Sector [extra...]`
 fn parse_thing(line: &str) -> Option<Thing> {
     // `BK_THING_ROW=1`: the raw row, so the keys the engine writes after the sector column can be
@@ -670,16 +688,21 @@ fn parse_thing(line: &str) -> Option<Thing> {
     // repeat, one entry per keyframe.
     let mut flags = 0;
     let mut type_flags = None;
+    let mut explosion_type_flags = 0;
     let mut frames = Vec::new();
     let mut vel = [0.0; 3];
     let mut aiclass = None;
     for word in f[9..].iter() {
+        if let Some((key, _)) = word.split_once('=') {
+            explosion_type_flags |= explosion_argument_flags(key);
+        }
         if let Some(v) = word.strip_prefix("thingflags=0x") {
             flags = u32::from_str_radix(v, 16).unwrap_or(0);
         } else if let Some(v) = word.strip_prefix("typeflags=") {
             let v = v.strip_prefix("0x").or_else(|| v.strip_prefix("0X")).unwrap_or(v);
             if let Ok(value) = u32::from_str_radix(v, 16) {
                 type_flags = Some(value);
+                explosion_type_flags = 0;
             }
         } else if word.starts_with("frame=") {
             if let Some(fr) = Thing::parse_frame(word) {
@@ -707,6 +730,7 @@ fn parse_thing(line: &str) -> Option<Thing> {
         sector: f[9].parse().unwrap_or(-1),
         flags,
         type_flags,
+        explosion_type_flags,
         frames,
         vel,
         aiclass,

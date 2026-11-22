@@ -3457,9 +3457,9 @@ non-decaying until this check printed a full 30.
 The runtime copies the inherited `typeflags` word into each thing; a placement can override it.
 The Cog type, actor, weapon, explosion, item, and particle flag verbs address that same per-thing
 word. Weapon updates use the current value, so scripts can enable or disable decay after spawn.
-Explosion templates also derive flag bits from `damage`, `blasttime`, `force`, `maxlight`, and
-`range`, in inherited argument order. Placement-level effect arguments are not yet reconstructed,
-and the current BKSV save format does not persist type flags.
+Explosion templates and placements also derive flag bits from `damage`, `blasttime`, `force`,
+`maxlight`, and `range`, in argument order. Placement type overrides and effect values are not yet
+fully reconstructed, and the current BKSV save format does not persist type flags.
 
 **In the window**, left mouse fires and created things are drawn. Three things had to be
 fixed for that to be true, and each was invisible until a screenshot proved it:
