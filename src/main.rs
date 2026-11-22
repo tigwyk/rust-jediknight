@@ -3694,7 +3694,7 @@ fn main() {
                 && let Some(player) = player_index
             {
                 let local = sim_world.borrow_mut().call("GetLocalPlayerThing", &[]);
-                let flags = sim_world.borrow().actor_flags.get(&player).copied().unwrap_or(0);
+                let flags = sim_world.borrow().things.get(player).map_or(0, |t| t.type_flags);
                 let invulnerable = flags & runtime::AF_INVULNERABLE != 0;
                 println!(
                     "endlevel: {delivered} message(s) so far; player thing {player} (GetLocalPlayerThing {local:?}), actor flags {flags:#x}"
@@ -3759,7 +3759,7 @@ fn main() {
         assert!(completed, "the goal -> master cog chain did not end the level");
         // ...and vulnerable again, or the freeze would outlive the level.
         if let Some(player) = player_index {
-            let flags = sim_world.borrow().actor_flags.get(&player).copied().unwrap_or(0);
+            let flags = sim_world.borrow().things.get(player).map_or(0, |t| t.type_flags);
             assert_eq!(
                 flags & runtime::AF_INVULNERABLE,
                 0,
@@ -7201,7 +7201,7 @@ fn main() {
                 let rt = handle.borrow();
                 (
                     rt.things[actor].health,
-                    rt.actor_flags.get(&actor).copied().unwrap_or(0) & 0x40000 != 0,
+                    rt.things[actor].type_flags & 0x40000 != 0,
                 )
             };
             println!(
@@ -9367,7 +9367,7 @@ fn main() {
         // 4 u/s (0.62 s of flight), so it should land between the floor and the full hit.
         let decay_rate = rt.template_rate.get(&weapon.to_ascii_lowercase()).copied().unwrap_or(0.0);
         let floor = rt.template_min_damage.get(&weapon.to_ascii_lowercase()).copied().unwrap_or(damage);
-        if decay_rate > 0.0 && rt.template_decay.contains(&weapon.to_ascii_lowercase()) {
+        if decay_rate > 0.0 && rt.things[shot].type_flags & 0x4000 != 0 {
             assert!(carried < damage, "a decaying bolt landed full damage {carried}");
             assert!(carried >= floor, "damage {carried} fell below mindamage {floor}");
             println!(
@@ -26311,6 +26311,7 @@ fn particle_grow_scale(scale: f32, rate: f32, dt: f32) -> f32 {
 /// cel with probability `(cels - cel - 1) * (age / life) * dt`, independently.
 #[derive(Component)]
 struct ParticleCel {
+    thing: usize,
     template: String,
     material: String,
     size: f32,
@@ -26353,15 +26354,21 @@ struct ParticleGrow {
 /// thing list never contains them, which is why nothing appeared when one was fired.
 /// `sithParticle_Update`'s cel-cycling arm: advance each element's cel and swap its sprite mesh.
 fn cycle_particle_cels(
+    sim: Option<Res<Sim>>,
     time: Res<Time>,
     mut created: Option<ResMut<Created>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut elements: Query<(&mut Mesh3d, &mut ParticleCel)>,
 ) {
     let Some(created) = created.as_mut() else { return };
+    let Some(sim) = sim else { return };
+    let rt = sim.world.borrow();
     let dt = time.delta_secs().clamp(0.0, 0.1);
     for (mut mesh3d, mut cel) in &mut elements {
         cel.age += dt;
+        if !rt.things.get(cel.thing).is_some_and(|thing| thing.type_flags & 0x20 != 0) {
+            continue;
+        }
         let chance = particle_cel_chance(cel.cels, cel.cel, cel.age, cel.life, dt);
         if chance <= 0.0 || particle_cel_roll(&mut cel.rng) >= chance {
             continue;
@@ -26382,14 +26389,17 @@ fn cycle_particle_cels(
 fn grow_particles(
     sim: Option<Res<Sim>>,
     time: Res<Time>,
-    mut elements: Query<(&mut Transform, &ParticleGrow)>,
+    mut elements: Query<(&mut Transform, &mut ParticleGrow)>,
 ) {
     let Some(sim) = sim else { return };
     let dt = time.delta_secs().clamp(0.0, 0.1);
     let rt = sim.world.borrow();
-    for (mut transform, grow) in &mut elements {
+    for (mut transform, mut grow) in &mut elements {
         let Some(thing) = rt.things.get(grow.thing) else { continue };
-        let scale = particle_grow_scale(grow.scale, grow.rate, dt);
+        if particle_grows(thing.type_flags, grow.rate) {
+            grow.scale = particle_grow_scale(grow.scale, grow.rate, dt);
+        }
+        let scale = grow.scale;
         transform.translation = Vec3::from(thing.pos) + grow.offset * scale;
         transform.scale = Vec3::splat(scale);
     }
@@ -26519,21 +26529,7 @@ fn draw_created(
                 let last_cel = cels.saturating_sub(1);
                 // `sithParticle_Update`'s grow arm (`typeflags & 1`) uses the template's
                 // `maxthrust` as the scale rate; the element offsets scale about the cloud origin.
-                let typeflags = world
-                    .level
-                    .template_param(&template_key, "typeflags")
-                    .and_then(|raw| {
-                        let raw = raw.trim();
-                        u32::from_str_radix(
-                            raw.trim_start_matches("0x").trim_start_matches("0X"),
-                            16,
-                        )
-                        .ok()
-                    })
-                    .unwrap_or(0);
                 let grow_rate = world.level.template_f32(&template_key, "maxthrust").unwrap_or(0.0);
-                let grows = particle_grows(typeflags, grow_rate);
-                let cycles = typeflags & 0x20 != 0 && *cels > 1;
                 let life = world.level.template_f32(&template_key, "timer").unwrap_or(0.0);
                 for element in &cloud.vertices {
                     let cel = element.cel.clamp(0, last_cel as i32) as u32;
@@ -26561,7 +26557,7 @@ fn draw_created(
                         Transform::from_translation(Vec3::from(thing.pos) + Vec3::from(offset)),
                         Sprite3d,
                     ));
-                    if grows {
+                    if grow_rate > 0.0 {
                         entity.insert(ParticleGrow {
                             thing: index,
                             offset: Vec3::from(offset),
@@ -26569,8 +26565,9 @@ fn draw_created(
                             scale: 1.0,
                         });
                     }
-                    if cycles {
+                    if *cels > 1 {
                         entity.insert(ParticleCel {
+                            thing: index,
                             template: template_key.clone(),
                             material: cloud.material.clone(),
                             size: cloud.size,
@@ -28041,7 +28038,7 @@ fn setup(
                 // Without this the gunner's first two bolts (at 0.02 and 0.75 s) are swallowed and
                 // the first measured hit lands at 817 ms where retail's is at 300.
                 if rt.encounter_events_enabled {
-                    *rt.actor_flags.entry(player).or_insert(0) &= !runtime::AF_INVULNERABLE;
+                    rt.things[player].type_flags &= !runtime::AF_INVULNERABLE;
                 }
                 println!("scripts: started the player's class script `{name}` (from template `{template}`)");
             }
@@ -30374,7 +30371,7 @@ fn read_controls(capture: Option<Res<CaptureDt>>,
                 let rt = sim.world.borrow();
                 let index = rt.player_thing();
                 (
-                    rt.actor_flags.get(&index).copied().unwrap_or(0),
+                    rt.things.get(index).map_or(0, |t| t.type_flags),
                     rt.things.get(index).map(|t| t.jk_flags).unwrap_or(0),
                 )
             })
@@ -31325,6 +31322,7 @@ mod registration_tests {
                 roll: 0.0,
                 sector: 0,
                 flags: 0,
+                type_flags: None,
                 frames: Vec::new(),
                 vel: [0.0; 3],
                 aiclass: None,
@@ -31525,7 +31523,7 @@ mod registration_tests {
             ],
         });
         level.things.push(jkl::Thing {
-            template: "walkplayer".into(), pos: [0.0; 3], sector: 0, flags: 0,
+            template: "walkplayer".into(), pos: [0.0; 3], sector: 0, flags: 0, type_flags: None,
             pitch: 0.0, yaw: 0.0, roll: 0.0, frames: Vec::new(), vel: [0.0; 3], aiclass: None,
         });
         let verts = vec![[-10.0, 0.0, -10.0], [10.0, 0.0, -10.0], [10.0, 0.0, 10.0], [-10.0, 0.0, 10.0]];
@@ -31596,7 +31594,7 @@ mod registration_tests {
                     ("collide".into(), "1".into())],
             });
             level.things.push(jkl::Thing {
-                template: name.into(), pos, sector: 0, flags: 0,
+                template: name.into(), pos, sector: 0, flags: 0, type_flags: None,
                 pitch: 0.0, yaw: 0.0, roll: 0.0, frames: Vec::new(), vel: [0.0; 3], aiclass: None,
             });
         }
@@ -31864,6 +31862,7 @@ mod walker_tests {
             roll: 0.0,
             sector: 0,
             flags: 0,
+            type_flags: None,
             frames: Vec::new(),
             vel: [0.0; 3],
             aiclass: None,

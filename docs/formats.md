@@ -3454,6 +3454,12 @@ The parse matters: `typeflags=` is **hexadecimal**, so it cannot go through the 
 parser as the other template params — that silently returned `None` and every weapon looked
 non-decaying until this check printed a full 30.
 
+The runtime copies the inherited `typeflags` word into each thing; a placement can override it.
+The Cog type, actor, weapon, explosion, item, and particle flag verbs address that same per-thing
+word. Weapon updates use the current value, so scripts can enable or disable decay after spawn.
+Explosion argument-derived flag bits are not yet reconstructed, and the current BKSV save format
+does not persist type flags.
+
 **In the window**, left mouse fires and created things are drawn. Three things had to be
 fixed for that to be true, and each was invisible until a screenshot proved it:
 
