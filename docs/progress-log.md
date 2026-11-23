@@ -8229,3 +8229,9 @@ player, a rejected wait, and the accepted negative boundaries.
 `FUN_00507df0` (`0x507df0`) accepts `ChangeFireRate` only for the local player and a positive rate.
 `sithWeapon_SetFireRate` (`0x4d6830`) stores that interval without moving the current deadline.
 The port applies the accepted rate to both projectile and weapon-Cog firing paths.
+
+## #136: weapon activation Cog guards
+
+`FUN_00507870` (`0x507870`) accepts `ActivateWeapon` only for a valid, non-free thing, a
+nonnegative rate and mode 0 or 1. The regression covers rejected arguments and a valid actor with
+a zero rate.
