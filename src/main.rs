@@ -7036,10 +7036,15 @@ fn main() {
                     .things
                     .iter()
                     .enumerate()
-                    .find(|(i, t)| *i != player && !t.destroyed && rt.types.get(*i).copied() == Some(5))
+                    .find(|(i, t)| {
+                        *i != player && !t.destroyed && rt.types.get(*i).copied() == Some(5)
+                            && rt.templates.get(*i).and_then(|name| rt.template_move.get(name))
+                                .is_some_and(|movement| movement == "physics")
+                            && rt.mass.get(i).is_some_and(|mass| *mass > 0.0)
+                    })
                     .map(|(i, _)| i)
                 else {
-                    println!("pull: this level places no item to pull; the run is evidenced where one exists");
+                    println!("pull: this level places no positive-mass physics item to pull; the run is evidenced where one exists");
                     return;
                 };
                 // Inside the reach the script accepts at this rank (`0.5 + rank / 2` = 2.5) and in
@@ -7080,15 +7085,15 @@ fn main() {
             println!("pull: the script's own `pulse` targeted victim {victim} (item {item})");
             assert_eq!(victim, item as i64, "the pull did not target the item in front of the player");
             let _ = vm.run_label(&script, "deactivated");
-            let mut rt = handle.borrow_mut();
+            let rt = handle.borrow();
             let gravity_off = rt.things[item].phys_flags & 0x1 == 0;
-            rt.step(None, 1.0 / 30.0);
             let vel = rt.things[item].vel;
+            let expected = -30.0 / rt.mass[&item];
             println!(
                 "pull: after `deactivated`, gravity cleared: {gravity_off}, velocity {vel:?} (the script asks for 30 toward the player)"
             );
             assert!(gravity_off, "`ClearPhysicsFlags` did not clear gravity on the pulled thing");
-            assert!(vel[0] < -25.0, "`ApplyForce` did not send the item at the player (velocity {vel:?})");
+            assert!((vel[0] - expected).abs() < 1e-4, "`ApplyForce` did not send the item at the player (velocity {vel:?}, expected {expected})");
             }
         }
         // `force_grip.cog` is the pull's sibling and the other half the notes called blocked on a

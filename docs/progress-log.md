@@ -8235,3 +8235,10 @@ The port applies the accepted rate to both projectile and weapon-Cog firing path
 `FUN_00507870` (`0x507870`) accepts `ActivateWeapon` only for a valid, non-free thing, a
 nonnegative rate and mode 0 or 1. The regression covers rejected arguments and a valid actor with
 a zero rate.
+
+## #138: Cog ApplyForce
+
+The Cog entry (`0x503290`) reads one vector and accepts physics things only.
+`sithPhysics_ApplyForce` (`0x4f59b0`) immediately adds force divided by positive mass to velocity,
+sets physics flag `0x8000`, and detaches when upward acceleration exceeds `0.5`. The regression
+covers all vector components, movement and mass guards, the detach threshold, and weapon recoil.
