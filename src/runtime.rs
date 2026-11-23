@@ -1450,7 +1450,6 @@ pub struct Runtime {
     /// `Get/SetThingMass` and `Get/SetThingUserData`: plain per-thing values a script stores.
     pub mass: std::collections::BTreeMap<usize, f32>,
     pub user_data: std::collections::BTreeMap<usize, f32>,
-    pub force: std::collections::BTreeMap<usize, [f32; 3]>,
     pub actor_weapon: std::collections::BTreeMap<usize, i32>,
     /// `SetFaceGeoMode`: per-surface draw mode (`sithSurface_SetGeoMode`). 0 is
     /// `GEOMETRY_NONE` — the surface is not drawn at all, which is how a script makes broken glass
@@ -2632,7 +2631,6 @@ impl Runtime {
             // also the gravity arm's gate. Scripts can still overwrite it with `SetThingMass`.
             mass: placed_mass,
             user_data: Default::default(),
-            force: Default::default(),
             actor_weapon: Default::default(),
             play_mode: Default::default(),
             signature: Vec::new(),
@@ -3358,24 +3356,7 @@ impl Runtime {
 
     /// The per-frame tables `sithThing_Update`'s loop reads, and the one-time load attach.
     fn thing_update_begin(&mut self, geometry: Option<&crate::collide::Solids>, dt: f32) -> ThingPass {
-        let mut moved = std::mem::take(&mut self.respawned);
-        // `ApplyForce(thing, v)`: the impulse the force scripts apply. `force_pull.cog` gives a pulled
-        // item `30` units/s toward the player with gravity cleared (`ClearPhysicsFlags(thing, 0x1)`);
-        // the impulse is folded into the thing's velocity once, which is what makes it fly in.
-        //
-        // This replaced an invented continuous drag: `jkSetTarget` is only the *highlight* the reticle
-        // shows, and the real movement is this one impulse at the moment the power is released
-        // (`force_pull.cog`'s `deactivated`, §16.5).
-        if !self.force.is_empty() {
-            for (index, impulse) in std::mem::take(&mut self.force) {
-                if let Some(thing) = self.things.get_mut(index) {
-                    for (slot, add) in thing.vel.iter_mut().zip(impulse) {
-                        *slot += add;
-                    }
-                    moved.push(index);
-                }
-            }
-        }
+        let moved = std::mem::take(&mut self.respawned);
         // `sithPhysics.c`: a body in a `SITH_SECTOR_USETHRUST` sector gets `thrust * dt` added to its
         // velocity each step, exactly like gravity. Level 21's core tube lifts what stands in it.
         let thrust: Vec<[f32; 3]> = self.sectors.iter().map(|s| s.thrust).collect();
@@ -8107,7 +8088,7 @@ impl Runtime {
     fn sith_physics_apply_force(
         mass: f32, force: [f32; 3], vel: &mut [f32; 3], flags: &mut u32, detach: impl FnOnce(&mut [f32; 3]),
     ) {
-        if mass <= 0.0 { return; } // 0x523180
+        if mass <= 0.0 || mass.is_nan() { return; } // 0x523180
         let inverse = 1.0 / mass; // 0x523194
         if force[2] * inverse > 0.5 { detach(vel); } // 0x523198
         for (v, f) in vel.iter_mut().zip(force) { *v += f * inverse; }
@@ -11960,14 +11941,30 @@ impl Runtime {
                 }
                 Value::Num(((dx * yaw.cos() + dy * yaw.sin()) / flat) as f64)
             }
-            // `ApplyForce(thing, v)`: an impulse. The scripts give a pulled item `30` units/s toward the
-            // player with gravity cleared, so it flies in; `step` folds this into the thing's velocity.
+            // `ApplyForce(thing, v)`: the impulse the force scripts apply. `force_pull.cog` gives a pulled
+            // item a 30-unit force toward the player with gravity cleared (`ClearPhysicsFlags(thing, 0x1)`);
+            // the impulse is folded into the thing's velocity once, which is what makes it fly in.
+            //
+            // This replaced an invented continuous drag: `jkSetTarget` is only the *highlight* the reticle
+            // shows, and the real movement is this one impulse at the moment the power is released
+            // (`force_pull.cog`'s `deactivated`, §16.5). `sithPhysics_ApplyForce` (`0x4f59b0`) applies it
+            // immediately, after the Cog entry (`0x503290`) checks physics movement.
             "applyforce" => {
                 let thing = ti(0);
-                let force = [num(1) as f32, num(2) as f32, num(3) as f32];
-                let entry = self.force.entry(thing).or_insert([0.0; 3]);
-                for (slot, add) in entry.iter_mut().zip(force) {
-                    *slot += add;
+                if self.things.get(thing).is_some()
+                    && self.templates.get(thing).and_then(|name| self.template_move.get(name))
+                        .is_some_and(|movement| movement == "physics")
+                {
+                    let mass = self.mass.get(&thing).copied().unwrap_or(0.0);
+                    let force = args.get(1).map(vec3).unwrap_or([0.0; 3]);
+                    let mut vel = self.things[thing].vel;
+                    let mut flags = 0;
+                    Self::sith_physics_apply_force(mass, force, &mut vel, &mut flags, |vel| {
+                        self.sith_thing_detach_thing(thing);
+                        *vel = self.things[thing].vel;
+                    });
+                    self.things[thing].vel = vel;
+                    self.things[thing].phys_flags |= flags;
                 }
                 Value::Nil
             }
@@ -14084,11 +14081,47 @@ mod tests {
         assert_eq!(rt.call("jkgetsuperflags", &[]).num(), 0.0);
     }
 
+    #[test]
+    fn apply_force_updates_physics_velocity_immediately() {
+        let mut rt = door_runtime();
+        rt.template_move.insert("walkplayer".into(), "physics".into());
+        rt.mass.insert(0, 2.0);
+        rt.things[0].vel = [1.0, 2.0, 3.0];
+        let force = Value::Vec([4.0, 6.0, -2.0]);
+        rt.call("ApplyForce", &[Value::Num(0.0), force.clone()]);
+        assert_eq!(rt.things[0].vel, [3.0, 5.0, 2.0]);
+        assert_ne!(rt.things[0].phys_flags & 0x8000, 0);
+
+        rt.mass.insert(0, 0.0);
+        rt.call("ApplyForce", &[Value::Num(0.0), force.clone()]);
+        assert_eq!(rt.things[0].vel, [3.0, 5.0, 2.0]);
+        rt.mass.insert(0, f32::NAN);
+        rt.call("ApplyForce", &[Value::Num(0.0), force.clone()]);
+        assert_eq!(rt.things[0].vel, [3.0, 5.0, 2.0]);
+        rt.mass.insert(0, 2.0);
+        rt.template_move.insert("walkplayer".into(), "path".into());
+        rt.call("ApplyForce", &[Value::Num(0.0), force]);
+        assert_eq!(rt.things[0].vel, [3.0, 5.0, 2.0]);
+
+        rt.template_move.insert("walkplayer".into(), "physics".into());
+        rt.things[0].vel = [0.0; 3];
+        rt.things[0].floor_attach = Some(crate::collide::Attach {
+            normal: [0.0, 0.0, 1.0], point: [0.0; 3], surface: None, thing: None, friction: 0.0,
+        });
+        rt.call("ApplyForce", &[Value::Num(0.0), Value::Vec([0.0, 0.0, 1.0])]);
+        assert!(rt.things[0].floor_attach.is_some());
+        rt.call("ApplyForce", &[Value::Num(0.0), Value::Vec([0.0, 0.0, 2.0])]);
+        assert!(rt.things[0].floor_attach.is_none());
+        assert_eq!(rt.things[0].vel, [0.0, 0.0, 1.5]);
+    }
+
     /// `GetThingLVec` is the thing's own look vector, and the weapon scripts turn it into recoil:
     /// `weap_bryar`/`weap_fists` run `ApplyForce(player, VectorScale(GetThingLVec(player), -80))`.
     #[test]
     fn the_look_vector_drives_the_weapons_recoil() {
         let mut rt = door_runtime();
+        rt.template_move.insert("walkplayer".into(), "physics".into());
+        rt.mass.insert(0, 1.0);
         rt.things[0].pitch = 0.0;
         rt.things[0].yaw = 90.0;
         rt.things[0].roll = 0.0;
@@ -14105,7 +14138,7 @@ mod tests {
         // The script's own expression: the kick goes backwards, against the look vector.
         let kick = vec3(&rt.call("vectorscale", &[answer, Value::Num(-80.0)]));
         rt.call("applyforce", &[Value::Num(0.0), Value::Vec([kick[0] as f64, kick[1] as f64, kick[2] as f64])]);
-        let stored = rt.force.get(&0).copied().unwrap_or([0.0; 3]);
+        let stored = rt.things[0].vel;
         for k in 0..3 {
             assert!((stored[k] - kick[k]).abs() < 1e-4, "the recoil did not land as an impulse");
         }

@@ -3629,10 +3629,11 @@ deactivated: ClearPhysicsFlags(throwThing, 0x1);          // gravity off
 ```
 
 So **`jkSetTarget` is only the highlight the reticle shows** — the reticle tints (`18,19,20` for pull,
-`6,7,8` for grip) and the target is marked. The movement is a single **`ApplyForce` impulse of 30 units/s
+`6,7,8` for grip) and the target is marked. The movement is a single **`ApplyForce` of 30 units
 toward the player, with gravity cleared**, applied when the power is *released* (`deactivated`), not a
-continuous drag. That corrected an earlier implementation of this port that dragged a held thing at a
-calibrated 12 u/s: the drag was invented, and the real number is 30, from the script.
+continuous drag. `sithPhysics_ApplyForce` (`0x4f59b0`) immediately adds force divided by mass to velocity.
+That corrected an earlier implementation of this port that dragged a held thing at a
+calibrated 12 u/s: the drag was invented, and the real force is 30, from the script.
 
 Recovered addresses (`JK.EXE`, image base `0x400000`), for the registration and the three verbs:
 
