@@ -12523,7 +12523,12 @@ impl Runtime {
                 let cog = self.caller_cog;
                 let rate = num(1) as f32;
                 let mode = idx(2) as i32;
-                if (0..2).contains(&mode) {
+                // `FUN_00507870` (`0x507870`) requires a non-free thing and a nonnegative rate.
+                if self.things.get(ti(0)).is_some()
+                    && self.types.get(ti(0)).is_some_and(|kind| *kind != 0)
+                    && rate >= 0.0
+                    && (0..2).contains(&mode)
+                {
                     self.weapon_cog = Some((cog, rate, mode));
                     self.weapon_rate = rate;
                     // `sithInventory_ActivateBin` starts the delay when the bin is armed.
@@ -15844,6 +15849,28 @@ mod tests {
         assert_eq!(rt.call("IsThingVisible", &[t.clone()]), Value::Num(1.0));
         rt.call("DestroyThing", &[t.clone()]);
         assert_eq!(rt.call("IsThingVisible", &[t]), Value::Num(0.0));
+    }
+
+    #[test]
+    fn activate_weapon_rejects_invalid_thing_rate_and_mode() {
+        let mut rt = door_runtime();
+        rt.things.push(rt.things[0].clone());
+        rt.things.push(rt.things[0].clone());
+        rt.types.extend([0, 2]);
+        for (thing, rate, mode) in [
+            (-1.0, 1.0, 0.0),
+            (3.0, 1.0, 0.0),
+            (1.0, 1.0, 0.0),
+            (0.0, -1.0, 0.0),
+            (0.0, 1.0, -1.0),
+            (0.0, 1.0, 2.0),
+        ] {
+            rt.call("ActivateWeapon", &[Value::Num(thing), Value::Num(rate), Value::Num(mode)]);
+            rt.time += 2.0;
+            assert!(!rt.try_fire_weapon(0), "invalid activation: {thing}, {rate}, {mode}");
+        }
+        rt.call("ActivateWeapon", &[Value::Num(2.0), Value::Num(0.0), Value::Num(1.0)]);
+        assert!(rt.try_fire_weapon(2));
     }
 
     #[test]

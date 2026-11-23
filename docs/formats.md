@@ -818,6 +818,7 @@ The Cog entry points accept only the local player and waits of at least -1 secon
 For `SetFireWait`, exactly -1 clears the fire wait; other accepted values set it.
 `ChangeFireRate(player, seconds)` accepts only the local player and a positive interval. It changes
 subsequent firing cadence without moving the already scheduled deadline.
+`ActivateWeapon` accepts any valid, non-free thing, a nonnegative interval, and mode 0 or 1.
 
 **`PlayKey` swaps a puppet's animation for one of the script's own keyframe symbols.**
 `PlayKey(thing, key, flags, frame)` is `sithPuppet_PlayKey`: the thing's puppet stops playing its
