@@ -11762,12 +11762,16 @@ impl Runtime {
             // `SetThingVel` is how the shipped force scripts move the player at all: force
             // jump does `upVel = VectorSet(0,0,duration + 2.5)` and adds the current
             // velocity, so the *script* owns the number, not the engine.
+            // The Cog entry (`0x503210`) writes velocity only for physics movement.
             "setthingvel" => {
                 let vel = match args.get(1) {
                     Some(Value::Vec(v)) => [v[0] as f32, v[1] as f32, v[2] as f32],
                     _ => [0.0; 3],
                 };
-                if let Some(thing) = self.thing_mut(idx(0)) {
+                if let Ok(index) = usize::try_from(idx(0))
+                    && self.floor_parent_move(index) == 1
+                    && let Some(thing) = self.things.get_mut(index)
+                {
                     thing.vel = vel;
                 }
                 Value::Nil
@@ -14113,6 +14117,22 @@ mod tests {
         rt.call("ApplyForce", &[Value::Num(0.0), Value::Vec([0.0, 0.0, 2.0])]);
         assert!(rt.things[0].floor_attach.is_none());
         assert_eq!(rt.things[0].vel, [0.0, 0.0, 1.5]);
+    }
+
+    #[test]
+    fn setthingvel_only_affects_physics_things() {
+        let mut rt = door_runtime();
+        rt.template_move.insert("walkplayer".into(), "physics".into());
+        rt.call("SetThingVel", &[Value::Num(0.0), Value::Vec([1.0, 2.0, 3.0])]);
+        assert_eq!(vec3(&rt.call("GetThingVel", &[Value::Num(0.0)])), [1.0, 2.0, 3.0]);
+
+        rt.template_move.insert("walkplayer".into(), "path".into());
+        rt.call("SetThingVel", &[Value::Num(0.0), Value::Vec([4.0, 5.0, 6.0])]);
+        assert_eq!(rt.things[0].vel, [1.0, 2.0, 3.0]);
+
+        rt.template_move.remove("walkplayer");
+        rt.call("SetThingVel", &[Value::Num(0.0), Value::Vec([7.0, 8.0, 9.0])]);
+        assert_eq!(rt.things[0].vel, [1.0, 2.0, 3.0]);
     }
 
     /// `GetThingLVec` is the thing's own look vector, and the weapon scripts turn it into recoil:
