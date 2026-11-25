@@ -3991,7 +3991,7 @@ impl Runtime {
         // `RotatePivot`: a thing turning about the pivot its frame names, a whole turn of `seconds`.
         // The pose is a function of progress from the pose it started at, so a long frame cannot
         // drift the way an accumulator would.
-        if let Some(spin) = self.things[index].spin.clone() {
+        if !self.things[index].paused && let Some(spin) = self.things[index].spin.clone() {
             let done = (spin.done + dt).min(spin.duration);
             let t = (done / spin.duration.max(1e-4)).clamp(0.0, 1.0);
             let angles = [
@@ -11596,10 +11596,12 @@ impl Runtime {
             // `trackParams.flags |= 0x80` (only when the thing is actually moving, answering its index
             // or -1) and `...Resume` clears it. Level 9's pipe doors stop in the doorway this way:
             // `09_stoppipedoors.cog` pauses when the player enters the sector and resumes on exit.
+            // The Cog entries (`0x503fa0`, `0x5040e0`) require path movement and return the thing index.
             "pathmovepause" => {
                 let Some(index) = usize::try_from(idx(0)).ok() else { return Value::Num(-1.0) };
+                if self.floor_parent_move(index) != 2 { return Value::Num(-1.0); }
                 match self.things.get_mut(index) {
-                    Some(t) if t.target.is_some() => {
+                    Some(t) if t.target.is_some() || t.spin.is_some() => {
                         t.paused = true;
                         Value::Num(index as f64)
                     }
@@ -11607,13 +11609,14 @@ impl Runtime {
                 }
             }
             "pathmoveresume" => {
-                let Some(index) = usize::try_from(idx(0)).ok() else { return Value::Num(0.0) };
+                let Some(index) = usize::try_from(idx(0)).ok() else { return Value::Num(-1.0) };
+                if self.floor_parent_move(index) != 2 { return Value::Num(-1.0); }
                 match self.things.get_mut(index) {
                     Some(t) if t.paused => {
                         t.paused = false;
-                        Value::Num(1.0)
+                        Value::Num(index as f64)
                     }
-                    _ => Value::Num(0.0),
+                    _ => Value::Num(-1.0),
                 }
             }
             // `GetThingGeoMode` reads the thing's draw mode and `SetThingCurGeoMode` writes it
@@ -14117,6 +14120,50 @@ mod tests {
         rt.call("ApplyForce", &[Value::Num(0.0), Value::Vec([0.0, 0.0, 2.0])]);
         assert!(rt.things[0].floor_attach.is_none());
         assert_eq!(rt.things[0].vel, [0.0, 0.0, 1.5]);
+    }
+
+    #[test]
+    fn path_pause_and_resume_validate_movement_and_return_thing() {
+        let mut rt = door_runtime();
+        rt.things.push(rt.things[0].clone());
+        rt.things.push(rt.things[0].clone());
+        rt.templates.push("physics".into());
+        rt.templates.push("lift".into());
+        rt.template_move.insert("physics".into(), "physics".into());
+        rt.template_move.insert("lift".into(), "path".into());
+        rt.things[1].target = Some((1.0, 1.0));
+        rt.things[2].target = Some((1.0, 1.0));
+
+        assert_eq!(rt.call("PathMovePause", &[Value::Num(1.0)]).num(), -1.0);
+        assert!(!rt.things[1].paused);
+        assert_eq!(rt.call("PathMovePause", &[Value::Num(2.0)]).num(), 2.0);
+        assert!(rt.things[2].paused);
+        assert_eq!(rt.call("PathMoveResume", &[Value::Num(2.0)]).num(), 2.0);
+        assert!(!rt.things[2].paused);
+        assert_eq!(rt.call("PathMoveResume", &[Value::Num(2.0)]).num(), -1.0);
+        assert_eq!(rt.call("PathMoveResume", &[Value::Num(-1.0)]).num(), -1.0);
+        rt.things[1].paused = true;
+        assert_eq!(rt.call("PathMoveResume", &[Value::Num(1.0)]).num(), -1.0);
+        assert!(rt.things[1].paused);
+    }
+
+    #[test]
+    fn path_pause_stops_and_resumes_pivot_rotation() {
+        let mut rt = door_runtime();
+        rt.templates[0] = "lift".into();
+        rt.types[0] = 3;
+        rt.template_move.insert("lift".into(), "path".into());
+        rt.things[0].frames[1][4] = 90.0;
+        rt.call("RotatePivot", &[Value::Num(0.0), Value::Num(1.0), Value::Num(2.0)]);
+        rt.step(None, 0.5);
+        let yaw = rt.things[0].yaw;
+        assert!(yaw > 0.0);
+        assert_eq!(rt.call("PathMovePause", &[Value::Num(0.0)]).num(), 0.0);
+        rt.step(None, 0.5);
+        assert_eq!(rt.things[0].yaw, yaw);
+        assert_eq!(rt.call("PathMoveResume", &[Value::Num(0.0)]).num(), 0.0);
+        rt.step(None, 0.5);
+        assert!(rt.things[0].yaw > yaw);
     }
 
     #[test]
