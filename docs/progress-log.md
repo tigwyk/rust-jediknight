@@ -8253,3 +8253,12 @@ nonmoving things retain their existing state. The regression also checks the phy
 The Cog entries (`0x503fa0`, `0x5040e0`) accept only path-moving things. Both return the thing's
 index on success and `-1` on failure. Pause also freezes active pivot rotation. The regressions
 cover non-path things, translation and pivot pause/resume, and invalid or repeated resume.
+
+## #141: path movement and velocity
+
+`GetThingVel` (`0x503160`) now reads path direction times speed. `MoveToFrame` (`0x502720`)
+scales Cog speed by 0.1, and `sithTrackThing_Arrivedidk` (`0x4faac0`) advances discrete segments.
+Path ticks (`0x4faf00`) sweep translation and pivot motion, preserve velocity while paused, and
+retain in-flight path state in saves. The sweep uses the existing collision implementation,
+whose tick callbacks remain deferred and whose rider recursion is not yet ported.
+
