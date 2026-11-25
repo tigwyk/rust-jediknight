@@ -8262,3 +8262,8 @@ Path ticks (`0x4faf00`) sweep translation and pivot motion, preserve velocity wh
 retain in-flight path state in saves. The sweep uses the existing collision implementation,
 whose tick callbacks remain deferred and whose rider recursion is not yet ported.
 
+## Path rotation motion reporting
+
+Path rotation and pivot steps report a translation only when the position changes. Pure rotations
+remain in `ThingMotion::turned`, and the door diagnostic waits for either kind of motion.
+
