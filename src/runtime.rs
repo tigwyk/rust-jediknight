@@ -158,7 +158,7 @@ pub struct SoundLoop {
 /// the rotation, `field_54 = 1 / seconds` the rate), which is what this is. The shipped users are an
 /// orbiting camera (a fulcrum the camera is attached to, `00_cameratricks.cog`), level 3's pool
 /// paddles and level 6's swinging door.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PivotSpin {
     /// The frame's position: what the thing turns *around*.
     pub centre: [f32; 3],
@@ -243,6 +243,16 @@ fn encounter_capture() -> bool {
     *ON
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PathState {
+    direction: [f32; 3],
+    remaining: f32,
+    next: i32,
+    blocked: u32,
+    moving: bool,
+    rotation: crate::path_rotation::PathRotation,
+}
+
 #[derive(Clone, Default)]
 pub struct ThingState {
     /// `0x4fbe10`'s re-touch clock (`thing+0x148`, engine ms): `touched` is suppressed until it
@@ -266,6 +276,7 @@ pub struct ThingState {
     pub frame: f32,
     /// Where `MoveToFrame` is heading, and how fast.
     pub target: Option<(f32, f32)>,
+    pub path: PathState,
     /// The thing's own keyframe path from the level file.
     pub frames: Vec<[f32; 6]>,
     /// `DestroyThing`: gone from the world, skipped by the sector iteration.
@@ -335,8 +346,106 @@ pub struct ThingState {
 }
 
 impl ThingState {
-    /// One animation step: advance `frame` toward the target and re-derive the pose.
-    /// Returns whether the thing moved.
+    /// `sithTrackThing_MoveToFrame` and `sithTrackThing_Arrivedidk` (`0x4fa840`, `0x4faac0`).
+    pub fn move_to_frame(&mut self, goal: usize, speed: f32) {
+        if goal >= self.frames.len() {
+            return;
+        }
+        self.target = Some((goal as f32, speed));
+        self.prepare_path_segment();
+    }
+
+    fn prepare_path_segment(&mut self) {
+        let Some((goal, speed)) = self.target else { return };
+        let goal = goal as i32;
+        let current = self.frame as i32;
+        let next = if current == goal {
+            goal
+        } else if current < 0 {
+            goal
+        } else if current < goal {
+            current + 1
+        } else {
+            current - 1
+        };
+        if current != goal {
+            self.path.next = next;
+        }
+        let Some(&frame) = usize::try_from(next).ok().and_then(|index| self.frames.get(index)) else {
+            self.target = None;
+            self.path = PathState::default();
+            return;
+        };
+        let difference = Vec3::new(frame[0] - self.pos[0], frame[1] - self.pos[1], frame[2] - self.pos[2]);
+        let distance = difference.length();
+        self.path.direction = if distance == 0.0 { [0.0; 3] } else { (difference / distance).to_array() };
+        if distance != 0.0 {
+            self.path.blocked = 0;
+            self.path.moving = true;
+            self.path.remaining = distance / speed;
+        }
+        if current == goal && self.path.remaining == 0.0 {
+            self.stop_path();
+            return;
+        }
+        let duration = if self.path.remaining < 1.0 { 1.0 } else { self.path.remaining };
+        let rotation = crate::path_rotation::PathRotation::prepare(
+            [self.pitch, self.yaw, self.roll], [frame[3], frame[4], frame[5]], duration,
+        );
+        if rotation.active {
+            self.path.rotation = rotation;
+        }
+    }
+
+    fn stop_path(&mut self) {
+        self.target = None;
+        self.path.moving = false;
+        self.path.rotation.active = false;
+        self.spin = None;
+        self.path.next = 0;
+        self.path.blocked = 0;
+        self.arrived = true;
+    }
+
+    /// `sithTrackThing_Tick` (`0x4faf00`) prepares rotation before translation.
+    fn begin_path_step(&mut self, dt: f32) -> Option<([f32; 3], f32)> {
+        let (_, speed) = self.target?;
+        if self.paused || dt == 0.0 {
+            return None;
+        }
+        if self.path.rotation.active {
+            self.path.rotation.advance(dt);
+            [self.pitch, self.yaw, self.roll] = self.path.rotation.current_euler();
+        }
+        let elapsed = if self.path.moving { dt.min(self.path.remaining) } else { 0.0 };
+        let distance = speed * elapsed;
+        let distance = if distance.abs() <= 0.00001 { 0.0 } else { distance };
+        Some((self.path.direction.map(|component| component * distance), elapsed))
+    }
+
+    fn finish_path_step(&mut self, elapsed: f32, requested: f32, traveled: f32) {
+        if self.path.moving {
+            let mut consumed = elapsed;
+            if traveled < requested {
+                self.path.blocked = self.path.blocked.wrapping_add(1);
+                consumed = if traveled.abs() <= 0.00001 { 0.0 } else { elapsed * traveled / requested };
+            }
+            self.path.remaining -= consumed;
+            if self.path.remaining.abs() <= 0.00001 {
+                self.path.moving = false;
+            }
+        }
+        if !self.path.moving && !self.path.rotation.active && self.spin.is_none() {
+            self.frame = self.path.next as f32;
+            if self.target.is_some_and(|(goal, _)| self.path.next != goal as i32) {
+                self.prepare_path_segment();
+            } else {
+                self.stop_path();
+            }
+        }
+    }
+
+    /// One unswept motion step, for callers without collision geometry.
     pub fn step(&mut self, dt: f32) -> bool {
         // `SetThingRotVel`'s angular velocity, integrated the way `sithPhysics` integrates it: the
         // orientation advances by `rotVel * dt` every step, and the angles wrap so a long spin does
@@ -348,38 +457,12 @@ impl ThingState {
         }
         // `PathMovePause` keeps the destination: the thing stands still where the pause caught it
         // and `PathMoveResume` carries on toward the same frame.
-        if self.paused {
-            return self.rot_vel != [0.0; 3];
+        let Some((delta, elapsed)) = self.begin_path_step(dt) else { return false };
+        for (position, delta) in self.pos.iter_mut().zip(delta) {
+            *position += delta;
         }
-        let Some((target, speed)) = self.target else { return false };
-        let delta = target - self.frame;
-        let step = speed.max(0.001) * dt;
-        let mut arrived = false;
-        if delta.abs() <= step {
-            self.frame = target;
-            self.target = None;
-            // The frame path's end: `SITH_MESSAGE_ARRIVED` is what a door or lift script waits on
-            // after `MoveToFrame`, and level 1 declares it 19 times.
-            arrived = true;
-        } else {
-            self.frame += step * delta.signum();
-        }
-        if self.frames.is_empty() {
-            return true;
-        }
-        let last = self.frames.len() - 1;
-        let f = self.frame.clamp(0.0, last as f32);
-        let i = (f.floor() as usize).min(last);
-        let j = (i + 1).min(last);
-        let t = f - i as f32;
-        let (a, b) = (self.frames[i], self.frames[j]);
-        for k in 0..3 {
-            self.pos[k] = a[k] + (b[k] - a[k]) * t;
-        }
-        self.pitch = a[3] + (b[3] - a[3]) * t;
-        self.yaw = a[4] + (b[4] - a[4]) * t;
-        self.roll = a[5] + (b[5] - a[5]) * t;
-        self.arrived = arrived;
+        let distance = Vec3::from(delta).length();
+        self.finish_path_step(elapsed, distance, distance);
         true
     }
 
@@ -631,6 +714,8 @@ pub struct ThingSave {
     pub jk_flags: u32,
     pub destroyed: bool,
     pub frame: f32,
+    /// Absent when loading a snapshot without path state.
+    pub path: Option<(PathState, Option<(f32, f32)>, bool, Option<PivotSpin>)>,
 }
 
 /// A whole savegame: the things, what the player carries, and the clock.
@@ -715,6 +800,50 @@ impl Snapshot {
                 None => out.push(0),
             }
         }
+        out.extend_from_slice(b"BKP1");
+        out.extend_from_slice(&(self.things.len() as u32).to_le_bytes());
+        for thing in &self.things {
+            if let Some((path, target, paused, spin)) = &thing.path {
+                out.push(1);
+                for value in path.direction.iter().chain([&path.remaining]) {
+                    out.extend_from_slice(&value.to_le_bytes());
+                }
+                out.extend_from_slice(&path.next.to_le_bytes());
+                out.extend_from_slice(&path.blocked.to_le_bytes());
+                out.push(u8::from(path.moving));
+                for value in path.rotation.start_matrix.iter().flatten()
+                    .chain(path.rotation.matrix.iter().flatten())
+                    .chain(path.rotation.delta.iter())
+                    .chain(path.rotation.target.iter())
+                    .chain([&path.rotation.rate, &path.rotation.progress])
+                {
+                    out.extend_from_slice(&value.to_le_bytes());
+                }
+                out.push(u8::from(path.rotation.active));
+                match target {
+                    Some((frame, speed)) => {
+                        out.push(1);
+                        out.extend_from_slice(&frame.to_le_bytes());
+                        out.extend_from_slice(&speed.to_le_bytes());
+                    }
+                    None => out.push(0),
+                }
+                out.push(u8::from(*paused));
+                if let Some(spin) = spin {
+                    out.push(1);
+                    for value in spin.centre.iter().chain(spin.angles.iter())
+                        .chain([&spin.duration, &spin.done])
+                        .chain(spin.start_pos.iter()).chain(spin.start_angles.iter())
+                    {
+                        out.extend_from_slice(&value.to_le_bytes());
+                    }
+                } else {
+                    out.push(0);
+                }
+            } else {
+                out.push(0);
+            }
+        }
         out
     }
 
@@ -736,6 +865,7 @@ impl Snapshot {
                 jk_flags: at.u32()?,
                 destroyed: at.u8()? != 0,
                 frame: at.f32()?,
+                path: None,
             });
         }
         for _ in 0..at.u32()? {
@@ -777,6 +907,67 @@ impl Snapshot {
                     1 => Some(at.u32()?),
                     _ => return None,
                 };
+            }
+            let remaining = &data[at.at..];
+            if !remaining.is_empty() && b"BKP1".starts_with(remaining) {
+                return None;
+            }
+            if remaining.starts_with(b"BKP") && !remaining.starts_with(b"BKP1") {
+                return None;
+            }
+            if remaining.starts_with(b"BKP1") {
+                at.take(4)?;
+                if at.u32()? as usize != save.things.len() {
+                    return None;
+                }
+                for thing in &mut save.things {
+                    match at.u8()? {
+                        0 => {}
+                        1 => {
+                            let mut path = PathState::default();
+                            for value in &mut path.direction {
+                                *value = at.f32()?;
+                            }
+                            path.remaining = at.f32()?;
+                            path.next = at.i32()?;
+                            path.blocked = at.u32()?;
+                            path.moving = match at.u8()? { 0 => false, 1 => true, _ => return None };
+                            for value in path.rotation.start_matrix.iter_mut().flatten()
+                                .chain(path.rotation.matrix.iter_mut().flatten())
+                                .chain(path.rotation.delta.iter_mut())
+                                .chain(path.rotation.target.iter_mut())
+                            {
+                                *value = at.f32()?;
+                            }
+                            path.rotation.rate = at.f32()?;
+                            path.rotation.progress = at.f32()?;
+                            path.rotation.active = match at.u8()? { 0 => false, 1 => true, _ => return None };
+                            let target = match at.u8()? {
+                                0 => None,
+                                1 => Some((at.f32()?, at.f32()?)),
+                                _ => return None,
+                            };
+                            let paused = match at.u8()? { 0 => false, 1 => true, _ => return None };
+                            let spin = match at.u8()? {
+                                0 => None,
+                                1 => Some(PivotSpin {
+                                    centre: [at.f32()?, at.f32()?, at.f32()?],
+                                    angles: [at.f32()?, at.f32()?, at.f32()?],
+                                    duration: at.f32()?,
+                                    done: at.f32()?,
+                                    start_pos: [at.f32()?, at.f32()?, at.f32()?],
+                                    start_angles: [at.f32()?, at.f32()?, at.f32()?],
+                                }),
+                                _ => return None,
+                            };
+                            thing.path = Some((path, target, paused, spin));
+                        }
+                        _ => return None,
+                    }
+                }
+                if at.at != data.len() {
+                    return None;
+                }
             }
         }
         Some(save)
@@ -2425,6 +2616,7 @@ impl Runtime {
                     },
                     frame: 0.0,
                     target: None,
+                    path: PathState::default(),
                     frames: t.frames.clone(),
                     destroyed: excluded[index],
                     vel: t.vel,
@@ -3052,6 +3244,7 @@ impl Runtime {
             health,
             frame: 0.0,
             target: None,
+            path: PathState::default(),
             frames: Vec::new(),
             destroyed: false,
             vel: self.template_vel.get(&template).copied().unwrap_or([0.0; 3]),
@@ -3784,6 +3977,86 @@ impl Runtime {
         }
     }
 
+    fn sweep_path(&mut self, solids: Option<&crate::collide::Solids>, index: usize, radius: f32, delta: [f32; 3]) -> f32 {
+        let thing = &mut self.things[index];
+        let requested = Vec3::from(delta).length();
+        if let Some(solids) = solids
+            && let Ok(sector) = usize::try_from(thing.sector)
+            && sector < solids.sectors.len()
+        {
+            let name = self.templates.get(index).map(String::as_str).unwrap_or("");
+            let mut state = crate::collide::MoveState {
+                pos: thing.pos, sector, vel: thing.vel, remainder: [0.0; 3],
+                phys_flags: thing.phys_flags, kind: self.types.get(index).copied().unwrap_or(0) as u32,
+                move_type: 2, collide: self.template_collide.get(name).copied().unwrap_or(0),
+                flags: thing.flags, attach: thing.floor_attach, attach_flags: thing.attach_flags,
+                owner: thing.owner, water_surface: None,
+            };
+            let traveled = self.move_gravity_body_sweep(solids, index, &mut state, delta, radius, 0.0, 0x44);
+            let thing = &mut self.things[index];
+            thing.pos = state.pos;
+            thing.sector = state.sector as i32;
+            traveled
+        } else {
+            for (position, delta) in thing.pos.iter_mut().zip(delta) { *position += delta; }
+            requested
+        }
+    }
+
+    /// Pivot rotation precedes path translation in `sithTrackThing_Tick` (`0x4faf00`).
+    fn sith_path_pivot(&mut self, pass: &mut ThingPass, solids: Option<&crate::collide::Solids>, index: usize) {
+        let thing = &self.things[index];
+        if thing.paused || pass.dt == 0.0 { return; }
+        let Some(mut spin) = thing.spin.clone() else { return };
+        let old_done = spin.done;
+        let mut done = (old_done + pass.dt).min(spin.duration);
+        let offset = (Vec3::from(spin.start_pos) - Vec3::from(spin.centre)).to_array();
+        let angles = spin.angles.map(|angle| angle * (done / spin.duration));
+        let (offset, mut orientation) = crate::path_rotation::pivot_pose(spin.start_angles, offset, angles, false);
+        let desired = Vec3::from(spin.centre) + Vec3::from(offset);
+        let delta = (desired - Vec3::from(thing.pos)).to_array();
+        let distance = Vec3::from(delta).length();
+        if distance > 0.00001 {
+            let traveled = self.sweep_path(solids, index, pass.body_radius[index], delta);
+            if traveled < distance {
+                done = old_done + (done - old_done) * traveled / distance;
+                let angles = spin.angles.map(|angle| angle * (done / spin.duration));
+                let offset = (Vec3::from(spin.start_pos) - Vec3::from(spin.centre)).to_array();
+                orientation = crate::path_rotation::pivot_pose(spin.start_angles, offset, angles, true).1;
+            }
+        }
+        let thing = &mut self.things[index];
+        [thing.pitch, thing.yaw, thing.roll] = orientation;
+        spin.done = done;
+        thing.spin = if done >= spin.duration { None } else { Some(spin) };
+        if thing.spin.is_none() && thing.target.is_none() {
+            thing.frame = thing.path.next as f32;
+            thing.stop_path();
+        }
+        if !pass.moved.contains(&index) { pass.moved.push(index); }
+        if !pass.turned.contains(&index) { pass.turned.push(index); }
+    }
+
+    /// `sithTrackThing_Tick` (`0x4faf00`) sweeps before consuming path time.
+    fn sith_path_motion(&mut self, pass: &mut ThingPass, solids: Option<&crate::collide::Solids>, index: usize) {
+        let thing = &mut self.things[index];
+        let rotating = thing.path.rotation.active && !thing.paused;
+        let Some((delta, elapsed)) = thing.begin_path_step(pass.dt) else { return };
+        let requested = Vec3::from(delta).length();
+        let traveled = self.sweep_path(solids, index, pass.body_radius[index], delta);
+        let thing = &mut self.things[index];
+        thing.finish_path_step(elapsed, requested, traveled);
+        let blocked = thing.path.moving && thing.path.blocked > 2 && thing.flags & 0x400 != 0 && thing.flags & 0x100 == 0;
+        if (requested != 0.0 || rotating) && !pass.moved.contains(&index) { pass.moved.push(index); }
+        if rotating && !pass.turned.contains(&index) { pass.turned.push(index); }
+        if blocked {
+            pass.blocked.push(index);
+            for instance in self.thing_instances(index) {
+                self.pending_messages.push((instance, "blocked", [0.0; 2], None, None));
+            }
+        }
+    }
+
     /// `sithPhysics_UpdateThing` or the frame path, and the move.
     fn sith_thing_motion(
         &mut self,
@@ -3792,6 +4065,14 @@ impl Runtime {
         i: usize,
     ) {
         let dt = pass.dt;
+        if self.floor_parent_move(i) == 2 {
+            let stored = pass.stored.clone();
+            let seat_geometry = geometry.or(stored.as_deref());
+            self.sith_path_pivot(pass, seat_geometry, i);
+            self.sith_path_motion(pass, seat_geometry, i);
+            self.sith_track_thing_arrived(pass, i);
+            return;
+        }
         let seat_geometry = geometry.or(pass.stored.as_deref());
         let seat = if Some(i) == pass.player_at { None } else {
             seat_geometry.and_then(|solids| self.move_gravity_body(solids, i, dt, pass.body_radius[i], &pass.thrust))
@@ -3807,7 +4088,7 @@ impl Runtime {
             if rotating {
                 turned.push(i);
             }
-            self.sith_track_thing_pivot(pass, i);
+            self.sith_track_thing_arrived(pass, i);
             return;
         }
         // MoveThing already ran the body's sweep and FindFloor tail.
@@ -3832,7 +4113,7 @@ impl Runtime {
             if flat > 0.0 || fell || crossed || attach_flipped || path_moved {
                 moved.push(i);
             }
-            self.sith_track_thing_pivot(pass, i);
+            self.sith_track_thing_arrived(pass, i);
             return;
         }
         let thrust = &pass.thrust;
@@ -3930,7 +4211,7 @@ impl Runtime {
                         + (resolved[1] - t.pos[1]) * t.vel[1]
                         + (resolved[2] - t.pos[2]) * t.vel[2];
                     if along >= 0.0 {
-                        self.sith_track_thing_pivot(pass, i);
+                        self.sith_track_thing_arrived(pass, i);
                         return;
                     }
                     t.destroyed = true;
@@ -3968,7 +4249,7 @@ impl Runtime {
             if lost {
                 // A projectile that dies on geometry is a miss in the encounter chronology.
                 self.note_shot_lost(i);
-                self.sith_track_thing_pivot(pass, i);
+                self.sith_track_thing_arrived(pass, i);
                 return;
             }
             if stopped {
@@ -3981,44 +4262,10 @@ impl Runtime {
         if path_moved || flying {
             pass.moved.push(i);
         }
-        self.sith_track_thing_pivot(pass, i);
+        self.sith_track_thing_arrived(pass, i);
     }
 
-    /// The frame path's turn and arrival, in the path slot: `RotatePivot`'s pivot turn, then the
-    /// `arrived` a finished frame move sends to the cogs linked to the thing.
-    fn sith_track_thing_pivot(&mut self, pass: &mut ThingPass, index: usize) {
-        let dt = pass.dt;
-        // `RotatePivot`: a thing turning about the pivot its frame names, a whole turn of `seconds`.
-        // The pose is a function of progress from the pose it started at, so a long frame cannot
-        // drift the way an accumulator would.
-        if !self.things[index].paused && let Some(spin) = self.things[index].spin.clone() {
-            let done = (spin.done + dt).min(spin.duration);
-            let t = (done / spin.duration.max(1e-4)).clamp(0.0, 1.0);
-            let angles = [
-                spin.angles[0] * t,
-                spin.angles[1] * t,
-                spin.angles[2] * t,
-            ];
-            // A positive yaw turns +Y toward -X, which is this world's own convention (`yaw_axes` in
-            // the renderer). Pitch is degrees above the horizon. `ponytail:` pitch and roll turn the
-            // *thing* but not the arm it swings on; every shipped `RotatePivot` pivots on yaw.
-            let turn = Quat::from_rotation_z(angles[1].to_radians());
-            let d = Vec3::from(spin.start_pos) - Vec3::from(spin.centre);
-            let orbited = Vec3::from(spin.centre) + turn * d;
-            if let Some(thing) = self.things.get_mut(index) {
-                thing.pos = [orbited.x, orbited.y, orbited.z];
-                thing.pitch = spin.start_angles[0] + angles[0];
-                thing.yaw = spin.start_angles[1] + angles[1];
-                thing.roll = spin.start_angles[2] + angles[2];
-                thing.spin = if done >= spin.duration { None } else { Some(PivotSpin { done, ..spin }) };
-            }
-            if !pass.moved.contains(&index) {
-                pass.moved.push(index);
-            }
-            if !pass.turned.contains(&index) {
-                pass.turned.push(index);
-            }
-        }
+    fn sith_track_thing_arrived(&mut self, pass: &mut ThingPass, index: usize) {
         if let Some(thing) = self.things.get_mut(index)
             && thing.arrived
         {
@@ -7909,7 +8156,7 @@ impl Runtime {
     fn move_gravity_body_sweep(
         &mut self, solids: &crate::collide::Solids, index: usize, state: &mut crate::collide::MoveState,
         delta: [f32; 3], radius: f32, height: f32, flags: u32,
-    ) {
+    ) -> f32 {
         let rt = std::cell::RefCell::new(self);
         solids.move_thing_with(
             state, delta, radius, flags,
@@ -7933,7 +8180,7 @@ impl Runtime {
                 if state.kind == 3 { return solids.probe_contact(state, hit, crease); }
                 Self::solid_contact(solids, &mut ContactRuntime::Tick(&mut rt.borrow_mut()), Some(index), state, hit, crease)
             },
-        );
+        )
     }
 
     /// `sithCollision_MoveThing`'s closing `sithPhysics_FindFloor(thing, 0)` (`0x4e7950:279-294`)
@@ -8022,7 +8269,7 @@ impl Runtime {
             let (vel, phys, flags) = rt.things.get(target).map_or(([0.0; 3], 0, 0), |t| (t.vel, t.phys_flags, t.flags));
             (mover_mass, target_mass, vel, phys, flags, rt.types.get(target).copied())
         });
-        // Path movers still use the separate path update, not this MoveThing sweep.
+        // Path movers accept the contact without applying physics impulses.
         if state.move_type != 1 || mover_mass == 0.0 { return true; }
         let [x, y, z] = hit.normal;
         let speed = -(state.vel[0] * x + state.vel[1] * y + state.vel[2] * z);
@@ -8447,14 +8694,7 @@ impl Runtime {
         let Some(parent) = self.things.get(index) else { return Vec3::ZERO };
         match self.floor_parent_move(index) {
             1 => Vec3::from(parent.vel),
-            2 if !parent.paused => {
-                // The port's frame rate is frames/second; the engine stores path direction × speed.
-                let Some((target, speed)) = parent.target else { return Vec3::ZERO };
-                let segment = if target > parent.frame { parent.frame.floor() } else { parent.frame.ceil() - 1.0 };
-                let i = segment.max(0.0) as usize;
-                let Some((a, b)) = parent.frames.get(i).zip(parent.frames.get(i + 1)) else { return Vec3::ZERO };
-                Vec3::new(b[0] - a[0], b[1] - a[1], b[2] - a[2]) * (speed * (target - parent.frame).signum())
-            }
+            2 => parent.target.map_or(Vec3::ZERO, |(_, speed)| Vec3::from(parent.path.direction) * speed),
             _ => Vec3::ZERO,
         }
     }
@@ -8991,6 +9231,7 @@ impl Runtime {
             health,
             frame: 0.0,
             target: None,
+            path: PathState::default(),
             frames: Vec::new(),
             destroyed: false,
             vel: forward,
@@ -10025,6 +10266,7 @@ impl Runtime {
             health,
             frame: 0.0,
             target: None,
+            path: PathState::default(),
             frames: Vec::new(),
             destroyed: false,
             vel: [0.0; 3],
@@ -10803,6 +11045,8 @@ impl Runtime {
                     jk_flags: thing.jk_flags,
                     destroyed: thing.destroyed,
                     frame: thing.frame,
+                    path: (self.floor_parent_move(index) == 2)
+                        .then(|| (thing.path.clone(), thing.target, thing.paused, thing.spin.clone())),
                 })
                 .collect(),
             inv: self.inv.clone(),
@@ -10836,6 +11080,12 @@ impl Runtime {
             thing.destroyed = saved.destroyed;
             thing.next_touch_ms = 0;
             thing.frame = saved.frame;
+            if let Some((path, target, paused, spin)) = &saved.path {
+                thing.path = path.clone();
+                thing.target = *target;
+                thing.paused = *paused;
+                thing.spin = spin.clone();
+            }
         }
         self.inv = save.inv.clone();
         self.weapon = save.weapon.clone();
@@ -11379,6 +11629,7 @@ impl Runtime {
             // loaded; so does this.
             "rotatepivot" => {
                 let Some(index) = usize::try_from(idx(0)).ok() else { return Value::Nil };
+                if self.floor_parent_move(index) != 2 { return Value::Nil; }
                 let Some(frame) = self
                     .things
                     .get(index)
@@ -11405,8 +11656,9 @@ impl Runtime {
                         start_pos: thing.pos,
                         start_angles: [thing.pitch, thing.yaw, thing.roll],
                     });
-                    // The frame path is done with: the engine sets `curframe = -1`.
-                    thing.target = None;
+                    // The engine invalidates the completed frame without clearing translation.
+                    thing.frame = -1.0;
+                    thing.path.rotation.active = false;
                 }
                 Value::Nil
             }
@@ -11509,6 +11761,7 @@ impl Runtime {
                     t.roll = from.3;
                     t.sector = from.4;
                     t.target = None;
+                    t.path = PathState::default();
                     t.vel = [0.0; 3];
                 }
                 if let Ok(sector) = usize::try_from(from.4) {
@@ -11779,12 +12032,12 @@ impl Runtime {
                 }
                 Value::Nil
             }
-            "getthingvel" => match self.thing(idx(0)) {
-                Some(thing) => {
-                    Value::Vec([thing.vel[0] as f64, thing.vel[1] as f64, thing.vel[2] as f64])
-                }
-                None => Value::Vec([0.0; 3]),
-            },
+            // `GetThingVel` (`0x503160`) reads physics velocity or path direction times speed.
+            "getthingvel" => {
+                let velocity = usize::try_from(idx(0)).ok()
+                    .map_or(Vec3::ZERO, |index| self.thing_support_velocity(index));
+                Value::Vec([velocity.x as f64, velocity.y as f64, velocity.z as f64])
+            }
             // `ActivateBin(player, bin, seconds?)` starts a power's hold timer;
             // `DeactivateBin` reports how long it was held, which is the jump's duration.
             // `SetActorExtraSpeed(thing, speed)`: force speed. The script sets `0.5 + rank/2`
@@ -13059,20 +13312,29 @@ impl Runtime {
             "ismoving" | "isthingmoving" => {
                 Value::Num(self.thing(idx(0)).map(|t| t.is_moving()).unwrap_or(false) as u8 as f64)
             }
-            // `MoveToFrame(thing, frame, speed)` — the door and lift primitive.
+            // `MoveToFrame` (`0x502720`) scales Cog speed by 0.1 before starting the path.
             "movetoframe" => {
-                if let Some(t) = self.thing_mut(idx(0))
-                    && t.frames.len() > 1
+                if let (Ok(index), Ok(goal)) = (usize::try_from(idx(0)), usize::try_from(idx(1)))
+                    && self.floor_parent_move(index) == 2
+                    && let Some(t) = self.things.get_mut(index)
+                    && goal < t.frames.len()
                 {
-                    let last = (t.frames.len() - 1) as f32;
-                    t.target = Some(((num(1) as f32).clamp(0.0, last), num(2) as f32));
+                    let speed = num(2) as f32 * 0.1;
+                    t.move_to_frame(goal, if speed == 0.0 { 0.5 } else { speed });
                     self.things_moved += 1;
                 }
                 Value::Nil
             }
             "stopthing" => {
-                if let Some(t) = self.thing_mut(idx(0)) {
-                    t.target = None;
+                if let Ok(index) = usize::try_from(idx(0)) {
+                    match self.floor_parent_move(index) {
+                        1 => if let Some(thing) = self.things.get_mut(index) {
+                            thing.vel = [0.0; 3];
+                            thing.rot_vel = [0.0; 3];
+                        },
+                        2 => if let Some(thing) = self.things.get_mut(index) { thing.stop_path(); },
+                        _ => {}
+                    }
                 }
                 Value::Nil
             }
@@ -14123,6 +14385,68 @@ mod tests {
     }
 
     #[test]
+    fn path_blocked_by_thing_keeps_velocity_and_retries() {
+        let solids = crate::collide::test_room();
+        solids.set_things(vec![crate::collide::ThingSolid {
+            index: 1, centre: [0.4, 0.0, 0.0], origin: [0.4, 0.0, 0.0], radius: 0.1,
+            z_min: -0.1, z_max: 0.1, sector: 0, half: None, yaw: 0.0, mesh: None,
+            thing_flags: 0, collide: 1, owner: None, kind: 10, item: false,
+        }]);
+        let mut rt = door_runtime();
+        rt.things[0].sector = 0;
+        rt.things[0].flags = 0x400;
+        rt.things.push(rt.things[0].clone());
+        rt.things[1].pos = [0.4, 0.0, 0.0];
+        rt.things[1].flags = 0;
+        rt.templates = vec!["lift".into(), "walkplayer".into()];
+        rt.types = vec![7, 10];
+        rt.template_move.insert("lift".into(), "path".into());
+        rt.template_collide.insert("lift".into(), 1);
+        rt.template_hit.insert("lift".into(), (0.1, 0.1));
+        rt.thing_links = vec![(5, 0, 0)];
+        rt.call("MoveToFrame", &[Value::Num(0.0), Value::Num(1.0), Value::Num(10.0)]);
+        for _ in 0..4 { rt.step(Some(&solids), 0.5); }
+        assert!(rt.things[0].pos[0] < 0.4);
+        assert_eq!(vec3(&rt.call("GetThingVel", &[Value::Num(0.0)])), [1.0, 0.0, 0.0]);
+        assert!(rt.pending_messages.iter().any(|(_, label, _, _, _)| *label == "blocked"));
+    }
+
+    #[test]
+    fn getthingvel_tracks_path_segments_and_pause() {
+        let mut rt = door_runtime();
+        rt.template_move.insert("walkplayer".into(), "path".into());
+        rt.things[0].pos = [0.0; 3];
+        rt.things[0].frames = vec![
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [2.0, 4.0, 0.0, 0.0, 0.0, 0.0],
+        ];
+        rt.call("MoveToFrame", &[Value::Num(0.0), Value::Num(2.0), Value::Num(20.0)]);
+        assert_eq!(vec3(&rt.call("GetThingVel", &[Value::Num(0.0)])), [2.0, 0.0, 0.0]);
+        rt.call("PathMovePause", &[Value::Num(0.0)]);
+        assert_eq!(vec3(&rt.call("GetThingVel", &[Value::Num(0.0)])), [2.0, 0.0, 0.0]);
+        rt.call("PathMoveResume", &[Value::Num(0.0)]);
+        rt.step(None, 1.0);
+        assert_eq!(rt.things[0].pos, [2.0, 0.0, 0.0]);
+        assert_eq!(vec3(&rt.call("GetThingVel", &[Value::Num(0.0)])), [0.0, 2.0, 0.0]);
+        rt.call("StopThing", &[Value::Num(0.0)]);
+        assert_eq!(vec3(&rt.call("GetThingVel", &[Value::Num(0.0)])), [0.0; 3]);
+    }
+
+    #[test]
+    fn path_retarget_uses_current_pose_and_zero_speed_default() {
+        let mut rt = door_runtime();
+        rt.template_move.insert("walkplayer".into(), "path".into());
+        rt.call("MoveToFrame", &[Value::Num(0.0), Value::Num(1.0), Value::Num(10.0)]);
+        rt.step(None, 0.5);
+        assert_eq!(rt.things[0].pos, [0.5, 0.0, 0.0]);
+        rt.call("MoveToFrame", &[Value::Num(0.0), Value::Num(0.0), Value::Num(0.0)]);
+        assert_eq!(vec3(&rt.call("GetThingVel", &[Value::Num(0.0)])), [-0.5, 0.0, 0.0]);
+        rt.step(None, 0.5);
+        assert_eq!(rt.things[0].pos, [0.25, 0.0, 0.0]);
+    }
+
+    #[test]
     fn path_pause_and_resume_validate_movement_and_return_thing() {
         let mut rt = door_runtime();
         rt.things.push(rt.things[0].clone());
@@ -14131,8 +14455,8 @@ mod tests {
         rt.templates.push("lift".into());
         rt.template_move.insert("physics".into(), "physics".into());
         rt.template_move.insert("lift".into(), "path".into());
-        rt.things[1].target = Some((1.0, 1.0));
-        rt.things[2].target = Some((1.0, 1.0));
+        rt.things[1].move_to_frame(1, 1.0);
+        rt.things[2].move_to_frame(1, 1.0);
 
         assert_eq!(rt.call("PathMovePause", &[Value::Num(1.0)]).num(), -1.0);
         assert!(!rt.things[1].paused);
@@ -14176,10 +14500,16 @@ mod tests {
         rt.template_move.insert("walkplayer".into(), "path".into());
         rt.call("SetThingVel", &[Value::Num(0.0), Value::Vec([4.0, 5.0, 6.0])]);
         assert_eq!(rt.things[0].vel, [1.0, 2.0, 3.0]);
+        assert_eq!(vec3(&rt.call("GetThingVel", &[Value::Num(0.0)])), [0.0; 3]);
 
         rt.template_move.remove("walkplayer");
         rt.call("SetThingVel", &[Value::Num(0.0), Value::Vec([7.0, 8.0, 9.0])]);
         assert_eq!(rt.things[0].vel, [1.0, 2.0, 3.0]);
+        assert_eq!(vec3(&rt.call("GetThingVel", &[Value::Num(0.0)])), [0.0; 3]);
+
+        rt.template_move.insert("walkplayer".into(), "physics".into());
+        rt.call("StopThing", &[Value::Num(0.0)]);
+        assert_eq!(vec3(&rt.call("GetThingVel", &[Value::Num(0.0)])), [0.0; 3]);
     }
 
     /// `GetThingLVec` is the thing's own look vector, and the weapon scripts turn it into recoil:
@@ -14296,6 +14626,7 @@ mod tests {
                 health: 100.0,
                 frame: 0.0,
                 target: None,
+                path: PathState::default(),
                 frames: vec![[0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
                 destroyed: false,
                 vel: [0.0; 3],
@@ -14435,20 +14766,22 @@ mod tests {
     #[test]
     fn the_player_moves_at_its_own_thing_index() {
         let mut rt = door_runtime();
-        let lift = ThingState { target: Some((1.0, 1.0)), ..rt.things[0].clone() };
+        let mut lift = rt.things[0].clone();
+        lift.move_to_frame(1, 1.0);
         rt.things = vec![lift.clone(), rt.things[0].clone(), lift];
         rt.templates = vec!["lift".into(), "walkplayer".into(), "lift".into()];
+        rt.template_move.insert("lift".into(), "path".into());
         rt.types = vec![0, 10, 0];
         let world = World::new(rt);
         let mut seen = None;
         Runtime::sith_thing_update(&world, None, 0.1, || {
             let rt = world.borrow();
-            seen = Some((rt.things[0].frame, rt.things[2].frame));
+            seen = Some((rt.things[0].pos[0], rt.things[2].pos[0]));
         });
         let (before, after) = seen.expect("the player's slot never ran");
         assert!(before > 0.0, "the thing before the player had not moved when the player's slot ran");
         assert_eq!(after, 0.0, "the thing after the player moved before the player's slot");
-        assert!(world.borrow().things[2].frame > 0.0, "the thing after the player never moved");
+        assert!(world.borrow().things[2].pos[0] > 0.0, "the thing after the player never moved");
     }
 
     /// `sithPhysics_UpdateThingPhysics`'s gravity arm is not a weapons-only rule: the shipped `_actor`
@@ -14887,20 +15220,21 @@ mod tests {
     #[test]
     fn door_verbs_move_a_thing_and_close_a_sector() {
         let mut rt = door_runtime();
+        rt.template_move.insert("walkplayer".into(), "path".into());
         rt.call("SetSectorAdjoins", &[Value::Num(0.0), Value::Num(0.0)]);
         assert_eq!(rt.adjoins_changes, 1);
         assert_eq!(rt.call("GetSectorAdjoins", &[Value::Num(0.0)]), Value::Num(0.0));
 
-        rt.call("MoveToFrame", &[Value::Num(0.0), Value::Num(1.0), Value::Num(2.0)]);
+        rt.call("MoveToFrame", &[Value::Num(0.0), Value::Num(1.0), Value::Num(20.0)]);
         assert_eq!(rt.things_moved, 1);
         assert_eq!(rt.call("IsMoving", &[Value::Num(0.0)]), Value::Num(1.0));
 
-        // Two seconds of motion at 2 frames/s reaches frame 1 and the thing moves.
+        // Two seconds at 2 world units/s reaches frame 1.
         for _ in 0..240 {
             rt.step(None, 1.0 / 120.0);
         }
         assert_eq!(rt.call("GetCurFrame", &[Value::Num(0.0)]), Value::Num(1.0));
-        assert_eq!(rt.things[0].pos[0], 1.0);
+        assert!((rt.things[0].pos[0] - 1.0).abs() < 1e-5);
         assert_eq!(rt.call("GetThingSector", &[Value::Num(0.0)]), Value::Num(7.0));
 
         rt.call("PlaySoundPos", &[Value::Str("door.wav".into()), Value::Vec([1.0, 2.0, 3.0])]);
@@ -15824,7 +16158,8 @@ mod tests {
     fn type_flags_survive_saves_and_old_saves_keep_level_defaults() {
         let rt = door_runtime();
         let bytes = rt.snapshot().to_bytes();
-        let extension_start = bytes.len() - 13;
+        let extension_start = bytes.windows(4).position(|window| window == b"BKT1").unwrap();
+        let path_start = extension_start + 13;
         assert_eq!(&bytes[extension_start..extension_start + 4], b"BKT1");
 
         let current = Snapshot::from_bytes(&bytes).unwrap();
@@ -15847,8 +16182,50 @@ mod tests {
         assert_eq!(item.things[0].type_flags, 0x80);
 
         for end in extension_start + 1..bytes.len() {
-            assert!(Snapshot::from_bytes(&bytes[..end]).is_none(), "accepted truncated extension at {end}");
+            if end != path_start {
+                assert!(Snapshot::from_bytes(&bytes[..end]).is_none(), "accepted truncated extension at {end}");
+            }
         }
+    }
+
+    #[test]
+    fn snapshot_restores_paused_path_and_rotation() {
+        let mut rt = door_runtime();
+        rt.template_move.insert("walkplayer".into(), "path".into());
+        rt.things[0].frames[1] = [2.0, 0.0, 0.0, 0.0, 90.0, 0.0];
+        rt.call("MoveToFrame", &[Value::Num(0.0), Value::Num(1.0), Value::Num(20.0)]);
+        rt.step(None, 0.25);
+        rt.call("PathMovePause", &[Value::Num(0.0)]);
+        let save = rt.snapshot();
+        let bytes = save.to_bytes();
+        let decoded = Snapshot::from_bytes(&bytes).unwrap();
+        let mut restored = door_runtime();
+        restored.template_move.insert("walkplayer".into(), "path".into());
+        restored.things[0].frames[1] = rt.things[0].frames[1];
+        restored.restore(&decoded);
+        restored.step(None, 0.5);
+        assert_eq!(restored.things[0].pos, rt.things[0].pos);
+        assert_eq!(restored.things[0].yaw, rt.things[0].yaw);
+        restored.call("PathMoveResume", &[Value::Num(0.0)]);
+        restored.step(None, 0.75);
+        assert!((restored.things[0].pos[0] - 2.0).abs() < 1e-5);
+        assert!((restored.things[0].yaw - 90.0).abs() < 0.01);
+
+        let path_start = bytes.windows(4).position(|window| window == b"BKP1").unwrap();
+        let old = Snapshot::from_bytes(&bytes[..path_start]).unwrap();
+        restored.things[0].path.remaining = 99.0;
+        restored.things[0].target = None;
+        restored.things[0].paused = false;
+        restored.restore(&old);
+        assert_eq!(restored.things[0].path.remaining, 99.0);
+        assert_eq!(restored.things[0].target, None);
+        assert!(!restored.things[0].paused);
+        for end in path_start + 1..bytes.len() {
+            assert!(Snapshot::from_bytes(&bytes[..end]).is_none());
+        }
+        let mut malformed = bytes.clone();
+        malformed[path_start + 8] = 2;
+        assert!(Snapshot::from_bytes(&malformed).is_none());
     }
 
     #[test]
@@ -18372,7 +18749,7 @@ mod tests {
         lift.flags = 0x40;
         lift.frame = 0.0;
         lift.frames = vec![[0.0; 6], [0.0, 0.0, 0.5, 0.0, 0.0, 0.0]];
-        lift.target = Some((1.0, 6.0));
+        lift.move_to_frame(1, 3.0);
         let parent = rt.things.len();
         rt.things.push(lift);
         rt.templates.push("testplatform".into());
@@ -18403,12 +18780,12 @@ mod tests {
         let target = body.attach.and_then(|a| a.thing).expect("mesh-floor attachment");
         assert_eq!(target.thing, parent);
         assert!((world.borrow().things[0].health - 55.0).abs() < 0.1, "impact is relative to the path's +3 u/s");
-        for (frame, z) in [(0.6, 0.3), (0.4, 0.2)] {
+        for (frame, speed, dt, z) in [(1, 3.0, 0.1, 0.3), (0, 0.5, 0.2, 0.2)] {
             {
                 let mut rt = world.borrow_mut();
-                rt.things[parent].target = Some((frame, 6.0));
-                assert!(rt.things[parent].step(0.2));
-                assert_eq!(rt.things[parent].pos[2], z);
+                rt.things[parent].move_to_frame(frame, speed);
+                assert!(rt.things[parent].step(dt));
+                assert!((rt.things[parent].pos[2] - z).abs() < 1e-6);
             }
             pose(z);
             for _ in 0..5 { tick(&mut body); }
@@ -18698,8 +19075,9 @@ mod tests {
         let mut rt = door_runtime();
         // The local player's path move is the walker's; use a door so `step` owns the pose.
         rt.templates = vec!["door1".into()];
+        rt.template_move.insert("door1".into(), "path".into());
         rt.thing_links = vec![(5, 0, 0)];
-        rt.things[0].target = Some((1.0, 10.0));
+        rt.things[0].move_to_frame(1, 10.0);
         let motion = rt.step(None, 0.2);
         assert_eq!(motion.arrived, vec![0], "the arriving thing was not reported");
         assert!(motion.moved.contains(&0), "the path move was not reported");

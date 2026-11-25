@@ -26,6 +26,7 @@ mod palette;
 mod par;
 mod ppm;
 mod pup;
+mod path_rotation;
 mod rows;
 mod runtime;
 mod sft;
@@ -8820,9 +8821,9 @@ fn main() {
             }
             let mut called = 0usize;
             for (thing, frames) in candidates.iter().take(3) {
-                let last = *frames as f32 - 1.0;
+                let last = *frames - 1;
                 // Ask the path to move and step until it reports the end of the run.
-                rt.things[*thing].target = Some((last, 1.0));
+                rt.things[*thing].move_to_frame(last, 1000.0);
                 for _ in 0..240 {
                     rt.step(None, 1.0 / 30.0);
                 }
@@ -9688,7 +9689,7 @@ fn main() {
         }) {
             rt.things[a].frames = vec![[0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [4.0, 0.0, 0.0, 0.0, 0.0, 0.0]];
             rt.things[a].frame = 0.0;
-            rt.things[a].target = Some((1.0, 2.0));
+            rt.things[a].move_to_frame(1, 2.0);
             rt.step(None, 0.25);
             let moved = rt.things[a].pos[0];
             let paused = rt.call("PathMovePause", &[cog::Value::Num(a as f64)]);
