@@ -8242,3 +8242,8 @@ The Cog entry (`0x503290`) reads one vector and accepts physics things only.
 `sithPhysics_ApplyForce` (`0x4f59b0`) immediately adds force divided by positive mass to velocity,
 sets physics flag `0x8000`, and detaches when upward acceleration exceeds `0.5`. The regression
 covers all vector components, movement and mass guards, the detach threshold, and weapon recoil.
+
+## #140: SetThingVel movement guard
+
+The `SetThingVel` Cog entry (`0x503210`) writes velocity only for physics movement. Path and
+nonmoving things retain their existing state. The regression also checks the physics write.

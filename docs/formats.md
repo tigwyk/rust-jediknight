@@ -3800,6 +3800,7 @@ ClearPhysicsFlags(player, 0x100000); SetBinWait(player, 21, 1.0);
 
 with `cost=20.0` charged out of bin 14 (force mana). So the engine constants a force jump
 needs are `2.5` and `0.35` per rank, and both are in the script, not in `JK.EXE`.
+The `SetThingVel` Cog entry (`0x503210`) writes the vector only for physics movement.
 
 `--force <power>` runs that script's own `startup` / `activated` / `deactivated` labels. The
 verb layer behind it (18 verbs: `SetThingVel`/`GetThingVel`, `ActivateBin`, `DeactivateBin`,
