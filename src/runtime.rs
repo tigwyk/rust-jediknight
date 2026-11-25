@@ -457,7 +457,7 @@ impl ThingState {
         }
         // `PathMovePause` keeps the destination: the thing stands still where the pause caught it
         // and `PathMoveResume` carries on toward the same frame.
-        let Some((delta, elapsed)) = self.begin_path_step(dt) else { return self.rot_vel != [0.0; 3] };
+        let Some((delta, elapsed)) = self.begin_path_step(dt) else { return false };
         for (position, delta) in self.pos.iter_mut().zip(delta) {
             *position += delta;
         }
