@@ -12170,7 +12170,7 @@ fn main() {
                 );
                 for _ in 0..180 {
                     let motion = handle.borrow_mut().step(None, 1.0 / 60.0);
-                    if motion.moved.is_empty() {
+                    if motion.moved.is_empty() && motion.turned.is_empty() {
                         break;
                     }
                 }

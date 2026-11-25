@@ -4006,6 +4006,7 @@ impl Runtime {
     /// Pivot rotation precedes path translation in `sithTrackThing_Tick` (`0x4faf00`).
     fn sith_path_pivot(&mut self, pass: &mut ThingPass, solids: Option<&crate::collide::Solids>, index: usize) {
         let thing = &self.things[index];
+        let previous = thing.pos;
         if thing.paused || pass.dt == 0.0 { return; }
         let Some(mut spin) = thing.spin.clone() else { return };
         let old_done = spin.done;
@@ -4033,13 +4034,14 @@ impl Runtime {
             thing.frame = thing.path.next as f32;
             thing.stop_path();
         }
-        if !pass.moved.contains(&index) { pass.moved.push(index); }
+        if thing.pos != previous && !pass.moved.contains(&index) { pass.moved.push(index); }
         if !pass.turned.contains(&index) { pass.turned.push(index); }
     }
 
     /// `sithTrackThing_Tick` (`0x4faf00`) sweeps before consuming path time.
     fn sith_path_motion(&mut self, pass: &mut ThingPass, solids: Option<&crate::collide::Solids>, index: usize) {
         let thing = &mut self.things[index];
+        let previous = thing.pos;
         let rotating = thing.path.rotation.active && !thing.paused;
         let Some((delta, elapsed)) = thing.begin_path_step(pass.dt) else { return };
         let requested = Vec3::from(delta).length();
@@ -4047,7 +4049,7 @@ impl Runtime {
         let thing = &mut self.things[index];
         thing.finish_path_step(elapsed, requested, traveled);
         let blocked = thing.path.moving && thing.path.blocked > 2 && thing.flags & 0x400 != 0 && thing.flags & 0x100 == 0;
-        if (requested != 0.0 || rotating) && !pass.moved.contains(&index) { pass.moved.push(index); }
+        if thing.pos != previous && !pass.moved.contains(&index) { pass.moved.push(index); }
         if rotating && !pass.turned.contains(&index) { pass.turned.push(index); }
         if blocked {
             pass.blocked.push(index);
@@ -14488,6 +14490,31 @@ mod tests {
         assert_eq!(rt.call("PathMoveResume", &[Value::Num(0.0)]).num(), 0.0);
         rt.step(None, 0.5);
         assert!(rt.things[0].yaw > yaw);
+    }
+
+    #[test]
+    fn path_rotation_reports_turning_without_translation() {
+        let mut rt = door_runtime();
+        rt.templates[0] = "lift".into();
+        rt.types[0] = 3;
+        rt.template_move.insert("lift".into(), "path".into());
+        rt.things[0].frames[1] = [0.0, 0.0, 0.0, 0.0, 90.0, 0.0];
+        rt.call("MoveToFrame", &[Value::Num(0.0), Value::Num(1.0), Value::Num(10.0)]);
+        let motion = rt.step(None, 0.5);
+        assert!(rt.things[0].yaw > 0.0);
+        assert_eq!(motion.turned, vec![0]);
+        assert!(!motion.moved.contains(&0));
+
+        let mut rt = door_runtime();
+        rt.templates[0] = "lift".into();
+        rt.types[0] = 3;
+        rt.template_move.insert("lift".into(), "path".into());
+        rt.things[0].frames[1] = [0.0, 0.0, 0.0, 0.0, 90.0, 0.0];
+        rt.call("RotatePivot", &[Value::Num(0.0), Value::Num(1.0), Value::Num(2.0)]);
+        let motion = rt.step(None, 0.5);
+        assert!(rt.things[0].yaw > 0.0);
+        assert_eq!(motion.turned, vec![0]);
+        assert!(!motion.moved.contains(&0));
     }
 
     #[test]
