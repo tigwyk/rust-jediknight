@@ -2641,6 +2641,9 @@ rather than an accumulator that drifts. Together with attachments this is the or
 `AttachThingToThing(camera1, fulcrum)` then `RotatePivot(fulcrum, 1, orbittime)` swings the camera
 around the fulcrum, which is the pair level 7 and `00_cameratricks.cog` use.
 
+`PathMovePause` and `PathMoveResume` (`0x503fa0`, `0x5040e0`) accept path things, return the thing
+index on success or `-1` on failure, and pause or resume both path translation and pivot rotation.
+
 **The pivot gate caught a sign error in the attachment rotation.** `update_attachments` rotated the
 child by hand as `(x cos + y sin, -x sin + y cos)` — a rotation by *minus* the parent's yaw — which
 agrees with nothing: this world's own convention is that a yaw of `a` faces `(-sin a, cos a)`, i.e.

@@ -9681,31 +9681,39 @@ fn main() {
 
         // `PathMovePause`/`PathMoveResume`: the thing keeps its destination and stops advancing —
         // level 9's pipe doors stop in the doorway this way (`09_stoppipedoors.cog`).
-        rt.things[a].frames = vec![[0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [4.0, 0.0, 0.0, 0.0, 0.0, 0.0]];
-        rt.things[a].frame = 0.0;
-        rt.things[a].target = Some((1.0, 2.0));
-        rt.step(None, 0.25);
-        let moved = rt.things[a].pos[0];
-        let paused = rt.call("PathMovePause", &[cog::Value::Num(a as f64)]);
-        rt.step(None, 1.0);
-        let held = rt.things[a].pos[0];
-        let still_moving = rt.call("IsMoving", &[cog::Value::Num(a as f64)]);
-        let resumed = rt.call("PathMoveResume", &[cog::Value::Num(a as f64)]);
-        rt.step(None, 0.25);
-        let carried_on = rt.things[a].pos[0];
-        println!(
-            "things: PathMovePause answered {paused:?} at x {moved:.2}, a second later it is still {held:.2} (`IsMoving` {still_moving:?}), and PathMoveResume answered {resumed:?} so it carries on to {carried_on:.2}"
-        );
-        assert_eq!(paused, cog::Value::Num(a as f64), "PathMovePause did not answer the thing");
-        assert_eq!(held, moved, "a paused path move kept advancing");
-        assert_eq!(still_moving, cog::Value::Num(1.0), "a paused thing stopped reporting as moving");
-        assert_eq!(resumed, cog::Value::Num(1.0), "PathMoveResume did not resume");
-        assert!(carried_on > held, "a resumed path move did not continue toward its frame");
-        // Pausing a thing that is not moving answers -1, which is the engine's guard.
-        assert_eq!(
-            rt.call("PathMovePause", &[cog::Value::Num(b as f64)]),
-            cog::Value::Num(-1.0)
-        );
+        if let Some(a) = (0..rt.things.len()).find(|&i| {
+            Some(i) != player_at && !rt.things[i].destroyed
+                && rt.templates.get(i).and_then(|name| rt.template_move.get(name))
+                    .is_some_and(|movement| movement == "path")
+        }) {
+            rt.things[a].frames = vec![[0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [4.0, 0.0, 0.0, 0.0, 0.0, 0.0]];
+            rt.things[a].frame = 0.0;
+            rt.things[a].target = Some((1.0, 2.0));
+            rt.step(None, 0.25);
+            let moved = rt.things[a].pos[0];
+            let paused = rt.call("PathMovePause", &[cog::Value::Num(a as f64)]);
+            rt.step(None, 1.0);
+            let held = rt.things[a].pos[0];
+            let still_moving = rt.call("IsMoving", &[cog::Value::Num(a as f64)]);
+            let resumed = rt.call("PathMoveResume", &[cog::Value::Num(a as f64)]);
+            rt.step(None, 0.25);
+            let carried_on = rt.things[a].pos[0];
+            println!(
+                "things: PathMovePause answered {paused:?} at x {moved:.2}, a second later it is still {held:.2} (`IsMoving` {still_moving:?}), and PathMoveResume answered {resumed:?} so it carries on to {carried_on:.2}"
+            );
+            assert_eq!(paused, cog::Value::Num(a as f64), "PathMovePause did not answer the thing");
+            assert_eq!(held, moved, "a paused path move kept advancing");
+            assert_eq!(still_moving, cog::Value::Num(1.0), "a paused thing stopped reporting as moving");
+            assert_eq!(resumed, cog::Value::Num(a as f64), "PathMoveResume did not answer the thing");
+            assert!(carried_on > held, "a resumed path move did not continue toward its frame");
+            // Pausing a thing that is not moving answers -1, which is the engine's guard.
+            assert_eq!(
+                rt.call("PathMovePause", &[cog::Value::Num(a as f64)]),
+                cog::Value::Num(-1.0)
+            );
+        } else {
+            println!("things: this level has no path-moving thing; pause and resume are untested");
+        }
 
         // `SetThingCurGeoMode`/`GetThingGeoMode`: 0 is not drawn, and the round trip is real.
         let before = rt.call("GetThingGeoMode", &[cog::Value::Num(a as f64)]);

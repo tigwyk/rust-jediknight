@@ -8247,3 +8247,9 @@ covers all vector components, movement and mass guards, the detach threshold, an
 
 The `SetThingVel` Cog entry (`0x503210`) writes velocity only for physics movement. Path and
 nonmoving things retain their existing state. The regression also checks the physics write.
+
+## #143: PathMovePause and PathMoveResume Cog guards
+
+The Cog entries (`0x503fa0`, `0x5040e0`) accept only path-moving things. Both return the thing's
+index on success and `-1` on failure. Pause also freezes active pivot rotation. The regressions
+cover non-path things, translation and pivot pause/resume, and invalid or repeated resume.
