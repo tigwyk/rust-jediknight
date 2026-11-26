@@ -29724,6 +29724,9 @@ fn sith_update(
     let step = control.as_ref().map_or(dt, |frame| frame.dt);
     let mut fired = 0;
     let mut crossed = false;
+    if let Some(player) = player.as_deref() {
+        handle.borrow_mut().set_player_collision(player.body.eye, player.rules.radius);
+    }
     let motion = runtime::Runtime::sith_thing_update(&handle, geometry, dt, |player_slot| {
         if !player_slot {
             if let Some(world) = world.as_deref() {
@@ -29744,6 +29747,9 @@ fn sith_update(
             },
         );
     });
+    if let Some(player) = player.as_deref_mut() {
+        runtime::Runtime::sync_player_body(&handle, &mut player.body);
+    }
     if let Some(count) = count.as_mut() {
         count.0 += fired;
     }
@@ -31592,6 +31598,227 @@ mod registration_tests {
         assert_eq!(body.sector, 1);
         assert_eq!(body.vy, -1.0);
         assert_eq!(handle.borrow().adjoin_flags[0] & 2, 0);
+    }
+
+    #[test]
+    fn non_rigid_riders_move_in_attachment_order_before_their_parent() {
+        for free_first in [true, false] {
+            let mut level = jkl::Level { gravity: 0.0, ..Default::default() };
+            for (name, movement, pos, yaw) in [
+                ("lift", "path", [-2.0, 0.0, 0.0], 45.0),
+                ("blocked", "physics", [0.5, 1.0, 0.0], 17.0),
+                ("free", "none", [-1.0, -1.0, 0.0], -23.0),
+            ] {
+                level.templates.push(jkl::Template {
+                    name: name.into(), base: None, model3d: None, sprite: None,
+                    params: vec![
+                        ("type".into(), "cog".into()), ("move".into(), movement.into()),
+                        ("collide".into(), "1".into()), ("size".into(), "0.1".into()),
+                    ],
+                });
+                level.things.push(jkl::Thing {
+                    template: name.into(), pos, sector: 0, flags: 0, type_flags: None,
+                    explosion_type_flags: 0, pitch: 0.0, yaw, roll: 0.0,
+                    frames: Vec::new(), vel: [0.0; 3], aiclass: None,
+                });
+            }
+            let plane = collide::Plane { normal: [1.0, 0.0, 0.0], point: [1.0, 0.0, 0.0], surface: 0 };
+            let face = collide::Face {
+                normal: plane.normal, point: plane.point,
+                verts: vec![[1.0, 3.0, -3.0], [1.0, -3.0, -3.0], [1.0, -3.0, 3.0], [1.0, 3.0, 3.0]],
+                surface: 0,
+            };
+            let solids = collide::Solids {
+                sectors: vec![vec![plane]], hull: vec![vec![plane]], portals: vec![Vec::new()],
+                walls: vec![face.clone()], faces: vec![face],
+                wall_of: [(0, 0)].into_iter().collect(), face_of: [(0, 0)].into_iter().collect(),
+                surface_owner: vec![0], ..Default::default()
+            };
+            let handle = runtime::Runtime::handle(&level);
+            {
+                let mut rt = handle.borrow_mut();
+                rt.things[0].frames = vec![
+                    [-2.0, 0.0, 0.0, 0.0, 45.0, 0.0],
+                    [-1.0, 0.0, 0.0, 0.0, 45.0, 0.0],
+                ];
+                // The engine inserts each attachment at the head of the parent's child list.
+                let order = if free_first { [1, 2] } else { [2, 1] };
+                for child in order {
+                    rt.call("AttachThingToThing", &[cog::Value::Num(child as f64), cog::Value::Num(0.0)]);
+                }
+                rt.call("MoveToFrame", &[cog::Value::Num(0.0), cog::Value::Num(1.0), cog::Value::Num(10.0)]);
+            }
+            runtime::Runtime::sith_thing_update(&handle, Some(&solids), 1.0, |_| {});
+            let rt = handle.borrow();
+            let parent_distance = rt.things[0].pos[0] + 2.0;
+            let blocked_distance = rt.things[1].pos[0] - 0.5;
+            let free_distance = rt.things[2].pos[0] + 1.0;
+            assert!(parent_distance > 0.0 && parent_distance < 0.8, "parent {parent_distance}, blocked rider {blocked_distance}, free rider {free_distance}");
+            assert!((blocked_distance - parent_distance).abs() < 0.01);
+            if free_first {
+                assert!((free_distance - 1.0).abs() < 0.01, "first rider traveled {free_distance}, parent traveled {parent_distance}");
+            } else {
+                assert!((free_distance - parent_distance).abs() < 0.01, "later rider traveled {free_distance}, parent traveled {parent_distance}");
+            }
+            assert_eq!(rt.things[1].yaw, 17.0);
+            assert_eq!(rt.things[2].yaw, -23.0);
+        }
+    }
+
+    #[test]
+    fn rotating_parent_sweeps_and_rotates_both_kinds_of_rider() {
+        let mut level = jkl::Level { gravity: 0.0, ..Default::default() };
+        for (name, movement, pos, yaw) in [
+            ("turntable", "path", [0.0, 0.0, 0.0], 0.0),
+            ("rider", "none", [1.0, 0.0, 0.0], 17.0),
+            ("rigid", "none", [2.0, 0.0, 0.0], -23.0),
+        ] {
+            level.templates.push(jkl::Template {
+                name: name.into(), base: None, model3d: None, sprite: None,
+                params: vec![("type".into(), "cog".into()), ("move".into(), movement.into())],
+            });
+            level.things.push(jkl::Thing {
+                template: name.into(), pos, sector: 0, flags: 0, type_flags: None,
+                explosion_type_flags: 0, pitch: 0.0, yaw, roll: 0.0,
+                frames: Vec::new(), vel: [0.0; 3], aiclass: None,
+            });
+        }
+        let solids = collide::Solids {
+            sectors: vec![Vec::new()], hull: vec![Vec::new()], portals: vec![Vec::new()],
+            ..Default::default()
+        };
+        let handle = runtime::Runtime::handle(&level);
+        {
+            let mut rt = handle.borrow_mut();
+            rt.things[0].frames = vec![
+                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0, 90.0, 0.0],
+            ];
+            for child in [1, 2] {
+                rt.call("AttachThingToThing", &[cog::Value::Num(child as f64), cog::Value::Num(0.0)]);
+            }
+            rt.call("SetThingAttachFlags", &[cog::Value::Num(2.0), cog::Value::Num(8.0)]);
+            rt.call("MoveToFrame", &[cog::Value::Num(0.0), cog::Value::Num(1.0), cog::Value::Num(10.0)]);
+        }
+        let motion = runtime::Runtime::sith_thing_update(&handle, Some(&solids), 1.0, |_| {});
+        let rt = handle.borrow();
+        for (index, distance, yaw) in [(1, 1.0, 107.0), (2, 2.0, 67.0)] {
+            let thing = &rt.things[index];
+            assert!(thing.pos[0].abs() < 0.001 && (thing.pos[1] - distance).abs() < 0.001, "rider {index}: {:?}", thing.pos);
+            assert!((thing.yaw - yaw).abs() < 0.01, "rider {index}: yaw {}", thing.yaw);
+            assert!(motion.moved.contains(&index));
+        }
+    }
+
+    #[test]
+    fn snapshot_restores_saved_attachments_and_replaces_stale_links() {
+        let mut level = jkl::Level { gravity: 0.0, ..Default::default() };
+        for (name, movement, pos) in [
+            ("lift", "path", [0.0, 0.0, 0.0]),
+            ("first", "none", [1.0, 2.0, 3.0]),
+            ("second", "none", [-2.0, 1.0, 0.5]),
+            ("loose", "physics", [0.0, 3.0, 0.0]),
+            ("rigid", "physics", [2.0, -1.0, 1.0]),
+            ("other", "path", [10.0, 0.0, 0.0]),
+            ("stale", "none", [12.0, 0.0, 0.0]),
+        ] {
+            level.templates.push(jkl::Template {
+                name: name.into(), base: None, model3d: None, sprite: None,
+                params: vec![("type".into(), "cog".into()), ("move".into(), movement.into())],
+            });
+            level.things.push(jkl::Thing {
+                template: name.into(), pos, sector: 0, flags: 0, type_flags: None,
+                explosion_type_flags: 0, pitch: 0.0, yaw: 0.0, roll: 0.0,
+                frames: Vec::new(), vel: [0.0; 3], aiclass: None,
+            });
+        }
+        let handle = runtime::Runtime::handle(&level);
+        let mut rt = handle.borrow_mut();
+        let attach = |rt: &mut runtime::Runtime, child: usize, parent: usize| {
+            rt.call("AttachThingToThing", &[cog::Value::Num(child as f64), cog::Value::Num(parent as f64)]);
+        };
+        // Deliberately differ from record order. The loader inserts records by index at the head.
+        for child in [2, 4, 1, 3] {
+            attach(&mut rt, child, 0);
+        }
+        rt.call("SetThingAttachFlags", &[cog::Value::Num(4.0), cog::Value::Num(8.0)]);
+        let expected: Vec<_> = [1, 2, 4].iter().map(|&i| {
+            (rt.things[i].attach_flags, rt.things[i].attach_offset)
+        }).collect();
+        let bytes = rt.snapshot().to_bytes();
+        let saved = runtime::Snapshot::from_bytes(&bytes).expect("attachment snapshot");
+        let mut cyclic = saved.clone();
+        for attachment in cyclic.attachments.as_mut().unwrap() {
+            if attachment.child == 1 { attachment.parent = Some(2); }
+            if attachment.child == 2 { attachment.parent = Some(1); }
+        }
+        assert!(runtime::Snapshot::from_bytes(&cyclic.to_bytes()).is_none(), "cyclic riders must not load");
+
+        // Replace the saved links and add a link absent from the snapshot before loading in place.
+        for child in [1, 2, 3, 4, 6] {
+            attach(&mut rt, child, 5);
+        }
+        for _ in 0..2 {
+            rt.restore(&saved);
+            for (i, (flags, offset)) in [1, 2, 4].into_iter().zip(expected.iter()) {
+                assert_eq!(rt.things[i].attach, Some(0), "child {i} lost its saved parent");
+                assert_eq!(rt.things[i].attach_flags, *flags, "child {i} lost its flags");
+                assert_eq!(rt.things[i].attach_offset, *offset, "child {i} lost its offset");
+            }
+            assert_eq!(rt.things[3].attach, None, "non-rigid physics attachment must not be saved");
+            assert_eq!(rt.things[6].attach, None, "a stale attachment survived loading");
+        }
+    }
+
+    #[test]
+    fn player_body_syncs_after_a_later_lift_moves_its_rider() {
+        let mut level = jkl::Level { gravity: 0.0, ..Default::default() };
+        for (name, kind, movement, pos) in [
+            ("walkplayer", "player", "physics", [0.0, 1.0, 1.0]),
+            ("lift", "cog", "path", [0.0, 0.0, 0.0]),
+        ] {
+            level.templates.push(jkl::Template {
+                name: name.into(), base: None, model3d: None, sprite: None,
+                params: vec![
+                    ("type".into(), kind.into()), ("move".into(), movement.into()),
+                    ("collide".into(), "1".into()), ("size".into(), "0.1".into()),
+                ],
+            });
+            level.things.push(jkl::Thing {
+                template: name.into(), pos, sector: 0, flags: 0, type_flags: None,
+                explosion_type_flags: 0, pitch: 0.0, yaw: 0.0, roll: 0.0,
+                frames: Vec::new(), vel: [0.0; 3], aiclass: None,
+            });
+        }
+        let solids = collide::Solids {
+            sectors: vec![Vec::new()], hull: vec![Vec::new()], portals: vec![Vec::new()],
+            ..Default::default()
+        };
+        let handle = runtime::Runtime::handle(&level);
+        let mut body = runtime::PlayerBody {
+            pos: Vec3::new(0.0, 1.0, 0.5), eye: 0.5, sector: 0, ..Default::default()
+        };
+        {
+            let mut rt = handle.borrow_mut();
+            rt.set_player_collision(body.eye, 0.1);
+            rt.things[1].frames = vec![
+                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            ];
+            rt.call("AttachThingToThing", &[cog::Value::Num(0.0), cog::Value::Num(1.0)]);
+            rt.call("MoveToFrame", &[cog::Value::Num(1.0), cog::Value::Num(1.0), cog::Value::Num(10.0)]);
+        }
+        let mut saw_player = false;
+        let motion = runtime::Runtime::sith_thing_update(&handle, Some(&solids), 1.0, |player| {
+            if player { saw_player = true; }
+        });
+        assert!(saw_player, "the player slot must precede the lift");
+        runtime::Runtime::sync_player_body(&handle, &mut body);
+        let rt = handle.borrow();
+        assert!((rt.things[0].pos[0] - 1.0).abs() < 0.01, "lift carried player to {:?}", rt.things[0].pos);
+        assert!(motion.moved.contains(&0), "renderer was not told the player moved");
+        assert!((body.pos.x - rt.things[0].pos[0]).abs() < 0.001);
+        assert!((body.pos.z + body.eye - rt.things[0].pos[2]).abs() < 0.001);
     }
 
     #[test]

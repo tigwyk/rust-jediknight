@@ -882,16 +882,20 @@ pub struct CollisionSearch {
     count: usize,
     sectors: [usize; 64],
     sector_count: usize,
-    excluded_thing: Option<usize>,
+    excluded_things: [Option<usize>; 2],
 }
 
 impl CollisionSearch {
     pub(crate) fn new() -> Self {
-        Self { records: [None; 128], count: 0, sectors: [0; 64], sector_count: 0, excluded_thing: None }
+        Self { records: [None; 128], count: 0, sectors: [0; 64], sector_count: 0, excluded_things: [None; 2] }
     }
 
     pub(crate) fn exclude_thing(&mut self, index: usize) {
-        self.excluded_thing = Some(index);
+        if !self.excluded_things.contains(&Some(index))
+            && let Some(slot) = self.excluded_things.iter_mut().find(|slot| slot.is_none())
+        {
+            *slot = Some(index);
+        }
     }
 
     fn push(&mut self, record: CollisionRecord) {
@@ -1273,7 +1277,7 @@ impl LevelGeometry {
         search.sector_count = 0;
         search.add_sector(sector);
         let things = self.things();
-        let excluded = search.excluded_thing;
+        let excluded = search.excluded_things;
         if flags & 1 == 0 {
             self.thing_contacts(&things, mover, start, dir, dist, radius, sector, flags, excluded, |_, hit| search.push(CollisionRecord::Solid(hit)));
         }
@@ -1764,7 +1768,7 @@ impl LevelGeometry {
         radius: f32,
         sector: usize,
         flags: u32,
-        excluded: Option<usize>,
+        excluded: [Option<usize>; 2],
         mut each: impl FnMut(&ThingSolid, Sweep),
     ) {
         let mut each = move |solid: &ThingSolid, mut hit: Sweep| {
@@ -1774,7 +1778,7 @@ impl LevelGeometry {
             each(solid, hit);
         };
         for thing in things.iter() {
-            if thing.sector != sector || excluded == Some(thing.index) {
+            if thing.sector != sector || excluded.contains(&Some(thing.index)) {
                 continue;
             }
             if flags & 8 != 0 && thing.thing_flags & 0x80 == 0 {
@@ -1842,6 +1846,7 @@ impl LevelGeometry {
             },
             |state| self.inside_sector_with_gates(state.sector, state.pos, 0.0, gates),
             |_| {},
+            |_| {},
             |_, _| {},
             |state, hit, crease| self.probe_contact(state, hit, crease),
         );
@@ -1886,15 +1891,15 @@ impl LevelGeometry {
     ///   `floor_tail` unless the caller passed `0x40`; an unattached (or attach-flag-8) body must
     ///   also carry physflag `0x40` and a vertical speed in `[-2.0, 0.2]` (`0x523018`/`0x52301c`).
     ///
-    /// The rider recursion of `:61-88`/`:266-278` (a thing's children move with it, `0x34 & 2`
-    /// damage) has no ported equivalent: no ported thing carries children. Callbacks run
-    /// synchronously; each search and final containment read the current world.
+    /// The caller handles rider recursion, crush damage, and placement for `:61-88`/`:266-278`.
+    /// Callbacks run synchronously; each search and final containment read the current world.
     #[allow(clippy::too_many_arguments)]
     pub fn move_thing_with(
         &self, state: &mut MoveState, delta: [f32; 3], radius: f32, flags: u32,
         mut search_world: impl FnMut(&MoveState, [f32; 3], f32, f32, u32, &mut CollisionSearch),
         mut crossing: impl FnMut(&mut MoveState, Option<usize>, usize),
         mut contains: impl FnMut(&MoveState) -> bool,
+        mut place_riders: impl FnMut(&mut MoveState),
         mut floor_tail: impl FnMut(&mut MoveState),
         mut touch_item: impl FnMut(&mut MoveState, usize),
         mut solid_contact: impl FnMut(&mut MoveState, Sweep, &mut Option<[f32; 3]>) -> bool,
@@ -1996,6 +2001,7 @@ impl LevelGeometry {
             state.pos = saved.0;
             crossing(state, None, saved.1);
         }
+        place_riders(state);
         // `0x4e7950:279-296` — the FindFloor tail.
         if state.move_type == 1 {
             if total == 0.0 { return total; }
@@ -2304,6 +2310,7 @@ impl LevelGeometry {
                 state.sector = far;
             },
             |state| self.inside_sector_with_gates(state.sector, state.pos, 0.0, gates),
+            |_| {},
             |state| { landed = self.finish_body(state, radius, height, gates); },
             |_, _| {},
             |state, hit, crease| self.probe_contact(state, hit, crease),
@@ -3398,6 +3405,7 @@ mod tests {
                 },
                 |_, _, _| {},
                 |_| true,
+                |_| {},
                 |_| {},
                 |state, item| {
                     assert!(contact.replace((item, state.pos)).is_none());
@@ -5336,6 +5344,7 @@ mod tests {
             },
             |state| solids.inside_sector_with_gates(state.sector, state.pos, 0.0, Gates::default()),
             |_| {},
+            |_| {},
             |_, _| {},
             |state, hit, crease| solids.probe_contact(state, hit, crease),
         );
@@ -5371,6 +5380,7 @@ mod tests {
             |state, surface, far| { if surface.is_some() { state.sector = far; } },
             |_| true,
             |_| {},
+            |_| {},
             |_, _| {},
             |state, hit, crease| solids.probe_contact(state, hit, crease),
         );
@@ -5400,6 +5410,7 @@ mod tests {
             |state, _, far| { state.sector = far; },
             |_| false,
             |_| {},
+            |_| {},
             |_, _| {},
             |state, hit, crease| solids.probe_contact(state, hit, crease),
         );
@@ -5426,6 +5437,7 @@ mod tests {
                 |_, _, _, _, _, _| {},
                 |_, _, _| {},
                 |_| true,
+                |_| {},
                 |_| { ran = true; },
                 |_, _| {},
                 |state, hit, crease| solids.probe_contact(state, hit, crease),
