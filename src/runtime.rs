@@ -328,7 +328,7 @@ pub struct ThingState {
     /// owner on the shot, and a muzzle inside the shooter's own body radius needs it.
     pub owner: Option<usize>,
     pub attach_offset: [f32; 3],
-    /// `SetThingAttachFlags`: stored, and `SITH_ATTACH_NOMOVE` (0x2) is the one read.
+    /// `SetThingAttachFlags`: the stored attachment word; bit 0x2 is a thing face, and 0x8 holds movement.
     pub attach_flags: u32,
     /// `RotatePivot`'s in-flight spin, if any.
     pub spin: Option<PivotSpin>,
@@ -4517,6 +4517,8 @@ impl Runtime {
                 | "rotatepivot"
                 | "getthingparent"
                 | "setthingattachflags"
+                | "clearthingattachflags"
+                | "getthingattachflags"
                 | "aisetfiretarget"
                 | "aiflee"
                 | "aisetclass"
@@ -11384,6 +11386,9 @@ impl Runtime {
         if child == parent || self.things.get(parent).is_none() {
             return;
         }
+        if self.things.get(child).is_some_and(|thing| thing.attach == Some(parent) && thing.attach_flags & 4 != 0) {
+            return;
+        }
         let (child_pos, parent_pos, parent_yaw) =
             match (self.things.get(child), self.things.get(parent)) {
                 (Some(c), Some(p)) => (c.pos, p.pos, p.yaw),
@@ -11401,7 +11406,7 @@ impl Runtime {
         if let Some(thing) = self.things.get_mut(child) {
             thing.attach = Some(parent);
             thing.attach_offset = offset;
-            thing.attach_flags = 1; // SITH_ATTACH_THING
+            thing.attach_flags = 4; // SITH_ATTACH_THING
         }
     }
 
@@ -11599,7 +11604,15 @@ impl Runtime {
             // the sphere `force_absorb.cog` hangs on the player, and the orbiting camera of
             // `00_cameratricks.cog`. `update_attachments` re-places the child every step.
             "attachthingtothing" | "attachthingtothingex" => {
-                self.attach_thing(idx(0), idx(1));
+                let (child, parent) = (idx(0), idx(1));
+                self.attach_thing(child, parent);
+                if verb.eq_ignore_ascii_case("attachthingtothingex")
+                    && let (Ok(child), Ok(parent)) = (usize::try_from(child), usize::try_from(parent))
+                    && child != parent && self.things.get(parent).is_some()
+                    && let Some(thing) = self.things.get_mut(child)
+                {
+                    thing.attach_flags |= idx(2) as u32;
+                }
                 Value::Nil
             }
             "detachthing" => {
@@ -11617,9 +11630,14 @@ impl Runtime {
                     .map(|p| p as f64)
                     .unwrap_or(-1.0),
             ),
-            "setthingattachflags" => {
+            // Cog attachment flag mutators (`0x504c20`, `0x504c80`) update individual bits.
+            "setthingattachflags" | "clearthingattachflags" => {
                 if let Some(thing) = usize::try_from(idx(0)).ok().and_then(|i| self.things.get_mut(i)) {
-                    thing.attach_flags = idx(1) as u32;
+                    if verb.eq_ignore_ascii_case("setthingattachflags") {
+                        thing.attach_flags |= idx(1) as u32;
+                    } else {
+                        thing.attach_flags &= !(idx(1) as u32);
+                    }
                 }
                 Value::Nil
             }
@@ -12721,9 +12739,11 @@ impl Runtime {
                 self.bin_wait.insert(idx(1) as i32, num(2) as f32);
                 Value::Nil
             }
-            // 1 = standing on a surface, 2 = against a thing face. A player on the floor is
-            // `1`; the force scripts only require *either* bit (or deep water).
-            "getattachflags" => Value::Num(1.0),
+            // `GetAttachFlags` and `GetThingAttachFlags` share the handler at `0x5034f0`.
+            // 1 = standing on a surface, 2 = against a thing face, and 4 = attached to a thing.
+            "getattachflags" | "getthingattachflags" => Value::Num(
+                self.thing(idx(0)).map_or(-1.0, |thing| thing.attach_flags as f64)
+            ),
             "getphysicsflags" => Value::Num(self.thing(idx(0)).map(|t| t.phys_flags as f64).unwrap_or(0.0)),
             "setphysicsflags" => {
                 if let Some(thing) = self.thing_mut(idx(0)) {
@@ -14384,6 +14404,30 @@ mod tests {
         rt.call("ApplyForce", &[Value::Num(0.0), Value::Vec([0.0, 0.0, 2.0])]);
         assert!(rt.things[0].floor_attach.is_none());
         assert_eq!(rt.things[0].vel, [0.0, 0.0, 1.5]);
+    }
+
+    #[test]
+    fn attachment_flag_verbs_preserve_kinds_and_masks() {
+        let mut rt = door_runtime();
+        rt.things.push(rt.things[0].clone());
+        let child = Value::Num(0.0);
+        let parent = Value::Num(1.0);
+        assert_eq!(rt.call("GetAttachFlags", &[child.clone()]).num(), 0.0);
+        assert_eq!(rt.call("GetThingAttachFlags", &[Value::Num(-1.0)]).num(), -1.0);
+        rt.things[0].attach_flags = 1;
+        assert_eq!(rt.call("GetAttachFlags", &[child.clone()]).num(), 1.0);
+        rt.things[0].attach_flags = 2;
+        assert_eq!(rt.call("GetThingAttachFlags", &[child.clone()]).num(), 2.0);
+        rt.call("AttachThingToThing", &[child.clone(), parent.clone()]);
+        assert_eq!(rt.call("GetAttachFlags", &[child.clone()]).num(), 4.0);
+        rt.call("SetThingAttachFlags", &[child.clone(), Value::Num(8.0)]);
+        assert_eq!(rt.call("GetAttachFlags", &[child.clone()]).num(), 12.0);
+        rt.call("AttachThingToThing", &[child.clone(), parent.clone()]);
+        assert_eq!(rt.call("GetAttachFlags", &[child.clone()]).num(), 12.0);
+        rt.call("ClearThingAttachFlags", &[child.clone(), Value::Num(8.0)]);
+        assert_eq!(rt.call("GetThingAttachFlags", &[child.clone()]).num(), 4.0);
+        rt.call("AttachThingToThingEx", &[child.clone(), parent, Value::Num(8.0)]);
+        assert_eq!(rt.call("GetAttachFlags", &[child]).num(), 12.0);
     }
 
     #[test]
