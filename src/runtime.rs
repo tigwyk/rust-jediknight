@@ -61,24 +61,29 @@ impl World {
     }
 }
 
-/// The player can release the runtime for scripts at a contact. Generic ticks already hold it,
-/// so they queue messages for the existing tick dispatch.
+/// Contact callbacks release the shared runtime before dispatching scripts.
 enum ContactRuntime<'a> {
     Player { world: &'a World, eye: f32, dispatch: &'a mut dyn FnMut() },
+    Mover { world: &'a World, index: usize, dispatch: &'a mut dyn FnMut() },
     Tick(&'a mut Runtime),
 }
 
 impl ContactRuntime<'_> {
     fn with<T>(&mut self, f: impl FnOnce(&mut Runtime) -> T) -> T {
         match self {
-            Self::Player { world, .. } => f(&mut world.borrow_mut()),
+            Self::Player { world, .. } | Self::Mover { world, .. } => f(&mut world.borrow_mut()),
             Self::Tick(rt) => f(rt),
         }
     }
 
     fn dispatch(&mut self, state: &mut crate::collide::MoveState) {
-        if let Self::Player { world, eye, dispatch } = self {
-            Runtime::player_move_phase(world, state, *eye, dispatch);
+        match self {
+            Self::Player { world, eye, dispatch } => {
+                let index = world.borrow().local_player();
+                Runtime::move_phase(world, index, state, *eye, dispatch);
+            }
+            Self::Mover { world, index, dispatch } => Runtime::move_phase(world, Some(*index), state, 0.0, dispatch),
+            Self::Tick(_) => {}
         }
     }
 
@@ -3451,7 +3456,10 @@ impl Runtime {
         self.sith_surface_tick(dt);
         let mut pass = self.thing_update_begin(geometry, dt);
         for index in 0..self.things.len() {
-            self.sith_thing_update_one(&mut pass, geometry, index);
+            if self.sith_thing_update_one(&mut pass, geometry, index) {
+                Self::thing_motion_with(&mut ContactRuntime::Tick(self), &mut pass, geometry, index);
+                self.sith_puppet_thing_key(&mut pass, index);
+            }
         }
         self.thing_update_end(pass)
     }
@@ -3529,7 +3537,7 @@ impl Runtime {
         world: &World,
         geometry: Option<&crate::collide::Solids>,
         dt: f32,
-        mut player: impl FnMut(),
+        mut callback: impl FnMut(bool),
     ) -> ThingMotion {
         let (mut pass, count) = {
             let mut rt = world.borrow_mut();
@@ -3539,9 +3547,14 @@ impl Runtime {
         };
         for index in 0..count {
             let active = world.borrow_mut().sith_thing_update_one(&mut pass, geometry, index);
-            if active && Some(index) == pass.player_at {
-                // `sithPhysics_UpdateThing` and `sithThing_UpdateMove` for the player's body.
-                player();
+            if active {
+                let mut dispatch = || callback(false);
+                let mut contact = ContactRuntime::Mover { world, index, dispatch: &mut dispatch };
+                Self::thing_motion_with(&mut contact, &mut pass, geometry, index);
+                world.borrow_mut().sith_puppet_thing_key(&mut pass, index);
+                if Some(index) == pass.player_at {
+                    callback(true);
+                }
             }
         }
         world.borrow_mut().thing_update_end(pass)
@@ -3705,12 +3718,7 @@ impl Runtime {
             _ if Some(i) == pass.player_at => self.sith_player_update(dt),
             _ => {}
         }
-        // 5. `sithPhysics_UpdateThing` (move=physics) or the frame path (move=path), then 6.
-        // `sithThing_UpdateMove` (`0x4cc4c0`) inside the physics body's move.
-        self.sith_thing_motion(pass, geometry, i);
-        // 7. The puppet slot (`sithPuppet_UpdatePuppet`, `0x4cc1e0:93`): the thing-track `PlayKey`.
-        // shortcut: the actors' animation input is still `animate_actors`' in the app.
-        self.sith_puppet_thing_key(pass, i);
+        // 5-7. Movement and the puppet slot run after releasing the runtime.
         true
     }
 
@@ -3977,48 +3985,58 @@ impl Runtime {
         }
     }
 
-    fn sweep_path(&mut self, solids: Option<&crate::collide::Solids>, index: usize, radius: f32, delta: [f32; 3]) -> f32 {
-        let thing = &mut self.things[index];
+    fn sweep_path(contact: &mut ContactRuntime<'_>, solids: Option<&crate::collide::Solids>, index: usize, radius: f32, delta: [f32; 3]) -> f32 {
         let requested = Vec3::from(delta).length();
-        if let Some(solids) = solids
-            && let Ok(sector) = usize::try_from(thing.sector)
-            && sector < solids.sectors.len()
-        {
-            let name = self.templates.get(index).map(String::as_str).unwrap_or("");
-            let mut state = crate::collide::MoveState {
+        let mut state = contact.with(|rt| {
+            let thing = &rt.things[index];
+            let sector = usize::try_from(thing.sector).ok()?;
+            if sector >= solids?.sectors.len() { return None; }
+            let name = rt.templates.get(index).map(String::as_str).unwrap_or("");
+            Some(crate::collide::MoveState {
                 pos: thing.pos, sector, vel: thing.vel, remainder: [0.0; 3],
-                phys_flags: thing.phys_flags, kind: self.types.get(index).copied().unwrap_or(0) as u32,
-                move_type: 2, collide: self.template_collide.get(name).copied().unwrap_or(0),
+                phys_flags: thing.phys_flags, kind: rt.types.get(index).copied().unwrap_or(0) as u32,
+                move_type: 2, collide: rt.template_collide.get(name).copied().unwrap_or(0),
                 flags: thing.flags, attach: thing.floor_attach, attach_flags: thing.attach_flags,
                 owner: thing.owner, water_surface: None,
-            };
-            let traveled = self.move_gravity_body_sweep(solids, index, &mut state, delta, radius, 0.0, 0x44);
-            let thing = &mut self.things[index];
+            })
+        });
+        if let (Some(solids), Some(state)) = (solids, &mut state) {
+            let traveled = Self::move_body_sweep(contact, solids, index, state, delta, radius, 0.0, 0x44);
+            contact.with(|rt| {
+            let thing = &mut rt.things[index];
             thing.pos = state.pos;
             thing.sector = state.sector as i32;
+            thing.vel = state.vel;
+            thing.flags = state.flags;
+            thing.phys_flags = state.phys_flags;
+            thing.floor_attach = state.attach;
+            thing.attach_flags = state.attach_flags;
+            });
             traveled
         } else {
-            for (position, delta) in thing.pos.iter_mut().zip(delta) { *position += delta; }
+            contact.with(|rt| for (position, delta) in rt.things[index].pos.iter_mut().zip(delta) { *position += delta; });
             requested
         }
     }
 
     /// Pivot rotation precedes path translation in `sithTrackThing_Tick` (`0x4faf00`).
-    fn sith_path_pivot(&mut self, pass: &mut ThingPass, solids: Option<&crate::collide::Solids>, index: usize) {
-        let thing = &self.things[index];
-        let previous = thing.pos;
-        if thing.paused || pass.dt == 0.0 { return; }
-        let Some(mut spin) = thing.spin.clone() else { return };
+    fn sith_path_pivot(contact: &mut ContactRuntime<'_>, pass: &mut ThingPass, solids: Option<&crate::collide::Solids>, index: usize) {
+        let initial = contact.with(|rt| {
+            let thing = &rt.things[index];
+            if thing.paused || pass.dt == 0.0 { return None; }
+            Some((thing.pos, thing.spin.clone()?))
+        });
+        let Some((previous, mut spin)) = initial else { return };
         let old_done = spin.done;
         let mut done = (old_done + pass.dt).min(spin.duration);
         let offset = (Vec3::from(spin.start_pos) - Vec3::from(spin.centre)).to_array();
         let angles = spin.angles.map(|angle| angle * (done / spin.duration));
         let (offset, mut orientation) = crate::path_rotation::pivot_pose(spin.start_angles, offset, angles, false);
         let desired = Vec3::from(spin.centre) + Vec3::from(offset);
-        let delta = (desired - Vec3::from(thing.pos)).to_array();
+        let delta = (desired - Vec3::from(previous)).to_array();
         let distance = Vec3::from(delta).length();
         if distance > 0.00001 {
-            let traveled = self.sweep_path(solids, index, pass.body_radius[index], delta);
+            let traveled = Self::sweep_path(contact, solids, index, pass.body_radius[index], delta);
             if traveled < distance {
                 done = old_done + (done - old_done) * traveled / distance;
                 let angles = spin.angles.map(|angle| angle * (done / spin.duration));
@@ -4026,7 +4044,8 @@ impl Runtime {
                 orientation = crate::path_rotation::pivot_pose(spin.start_angles, offset, angles, true).1;
             }
         }
-        let thing = &mut self.things[index];
+        contact.with(|rt| {
+        let thing = &mut rt.things[index];
         [thing.pitch, thing.yaw, thing.roll] = orientation;
         spin.done = done;
         thing.spin = if done >= spin.duration { None } else { Some(spin) };
@@ -4036,49 +4055,58 @@ impl Runtime {
         }
         if thing.pos != previous && !pass.moved.contains(&index) { pass.moved.push(index); }
         if !pass.turned.contains(&index) { pass.turned.push(index); }
+        });
     }
 
     /// `sithTrackThing_Tick` (`0x4faf00`) sweeps before consuming path time.
-    fn sith_path_motion(&mut self, pass: &mut ThingPass, solids: Option<&crate::collide::Solids>, index: usize) {
-        let thing = &mut self.things[index];
-        let previous = thing.pos;
-        let rotating = thing.path.rotation.active && !thing.paused;
-        let Some((delta, elapsed)) = thing.begin_path_step(pass.dt) else { return };
+    fn sith_path_motion(contact: &mut ContactRuntime<'_>, pass: &mut ThingPass, solids: Option<&crate::collide::Solids>, index: usize) {
+        let initial = contact.with(|rt| {
+            let thing = &mut rt.things[index];
+            let previous = thing.pos;
+            let rotating = thing.path.rotation.active && !thing.paused;
+            let (delta, elapsed) = thing.begin_path_step(pass.dt)?;
+            Some((previous, rotating, delta, elapsed))
+        });
+        let Some((previous, rotating, delta, elapsed)) = initial else { return };
         let requested = Vec3::from(delta).length();
-        let traveled = self.sweep_path(solids, index, pass.body_radius[index], delta);
-        let thing = &mut self.things[index];
+        let traveled = Self::sweep_path(contact, solids, index, pass.body_radius[index], delta);
+        contact.with(|rt| {
+        let thing = &mut rt.things[index];
         thing.finish_path_step(elapsed, requested, traveled);
         let blocked = thing.path.moving && thing.path.blocked > 2 && thing.flags & 0x400 != 0 && thing.flags & 0x100 == 0;
         if thing.pos != previous && !pass.moved.contains(&index) { pass.moved.push(index); }
         if rotating && !pass.turned.contains(&index) { pass.turned.push(index); }
         if blocked {
             pass.blocked.push(index);
-            for instance in self.thing_instances(index) {
-                self.pending_messages.push((instance, "blocked", [0.0; 2], None, None));
+            for instance in rt.thing_instances(index) {
+                rt.pending_messages.push((instance, "blocked", [0.0; 2], None, None));
             }
         }
+        });
     }
 
     /// `sithPhysics_UpdateThing` or the frame path, and the move.
-    fn sith_thing_motion(
-        &mut self,
-        pass: &mut ThingPass,
-        geometry: Option<&crate::collide::Solids>,
-        i: usize,
-    ) {
-        let dt = pass.dt;
-        if self.floor_parent_move(i) == 2 {
-            let stored = pass.stored.clone();
-            let seat_geometry = geometry.or(stored.as_deref());
-            self.sith_path_pivot(pass, seat_geometry, i);
-            self.sith_path_motion(pass, seat_geometry, i);
-            self.sith_track_thing_arrived(pass, i);
+    fn thing_motion_with(contact: &mut ContactRuntime<'_>, pass: &mut ThingPass, geometry: Option<&crate::collide::Solids>, i: usize) {
+        let stored = pass.stored.clone();
+        let solids = geometry.or(stored.as_deref());
+        if contact.with(|rt| rt.floor_parent_move(i)) == 2 {
+            Self::sith_path_pivot(contact, pass, solids, i);
+            Self::sith_path_motion(contact, pass, solids, i);
+            contact.with(|rt| rt.sith_track_thing_arrived(pass, i));
             return;
         }
-        let seat_geometry = geometry.or(pass.stored.as_deref());
+        let previous = contact.with(|rt| rt.things[i].pos);
         let seat = if Some(i) == pass.player_at { None } else {
-            seat_geometry.and_then(|solids| self.move_gravity_body(solids, i, dt, pass.body_radius[i], &pass.thrust))
+            solids.and_then(|solids| Self::move_gravity_body(contact, solids, i, pass.dt, pass.body_radius[i], &pass.thrust))
         };
+        contact.with(|rt| rt.sith_thing_motion(pass, i, seat, previous));
+    }
+
+    fn sith_thing_motion(
+        &mut self, pass: &mut ThingPass, i: usize,
+        seat: Option<(crate::collide::MoveState, f32, bool, Option<[f32; 3]>)>, previous: [f32; 3],
+    ) {
+        let dt = pass.dt;
         let moved = &mut pass.moved;
         let turned = &mut pass.turned;
         let t = &mut self.things[i];
@@ -4096,12 +4124,13 @@ impl Runtime {
         // MoveThing already ran the body's sweep and FindFloor tail.
         if let Some((state, flat, crossed, anchor)) = seat {
             let attach_flipped = t.floor_attach.is_some() != state.attach.is_some();
-            let fell = (state.pos[2] - t.pos[2]).abs() > 1e-9;
+            let fell = (state.pos[2] - previous[2]).abs() > 1e-9;
             t.pos = state.pos;
             t.sector = state.sector as i32;
             t.vel = state.vel;
             t.floor_attach = state.attach;
             t.attach_flags = state.attach_flags;
+            t.flags = state.flags;
             t.phys_flags = state.phys_flags;
             if let Some(anchor) = anchor { t.attach_offset = anchor; }
             let rotating = t.rot_vel != [0.0; 3];
@@ -8092,10 +8121,10 @@ impl Runtime {
     }
 
     /// The generic gravity tick's `sithPhysics_UpdateThing` -> `sithCollision_MoveThing`.
-    fn move_gravity_body(
+    fn prepare_gravity_body(
         &mut self, solids: &crate::collide::Solids, index: usize, dt: f32,
         radius: f32, thrust: &[[f32; 3]],
-    ) -> Option<(crate::collide::MoveState, f32, bool, Option<[f32; 3]>)> {
+    ) -> Option<(crate::collide::MoveState, [f32; 3], usize, f32, f32, f32, f32, [f32; 3], bool)> {
         let t = &self.things[index];
         let kind = self.types.get(index).copied()? as u32;
         let name = self.templates.get(index)?;
@@ -8124,6 +8153,7 @@ impl Runtime {
         }
         let previous = state.attach;
         let mut carry = [0.0; 3];
+        let mut detached = false;
         if let Some(attach) = previous.filter(|a| a.thing.is_some()) {
             if let Some((attach, displacement)) = self.floor_rider_motion(solids, attach, start, Some(t.attach_offset)) {
                 state.attach = Some(attach);
@@ -8132,18 +8162,31 @@ impl Runtime {
                 state.attach = None;
                 state.attach_flags = 0;
                 self.floor_transition(&mut state, previous, Some(index), false);
+                detached = true;
             }
         }
+        Some((state, start, sector, height, gravity, surf_drag, static_drag, carry, detached))
+    }
+
+    fn move_gravity_body(
+        contact: &mut ContactRuntime<'_>, solids: &crate::collide::Solids, index: usize, dt: f32,
+        radius: f32, thrust: &[[f32; 3]],
+    ) -> Option<(crate::collide::MoveState, f32, bool, Option<[f32; 3]>)> {
+        let (mut state, start, sector, height, gravity, surf_drag, static_drag, carry, detached) =
+            contact.with(|rt| rt.prepare_gravity_body(solids, index, dt, radius, thrust))?;
+        if detached { contact.dispatch(&mut state); }
         if carry != [0.0; 3] {
-            self.move_gravity_body_sweep(solids, index, &mut state, carry, radius, height, 0x40);
+            Self::move_body_sweep(contact, solids, index, &mut state, carry, radius, height, 0x40);
         }
         let thrust_sector = thrust.get(sector).is_some_and(|drive| *drive != [0.0; 3]);
         crate::collide::Solids::apply_attached_drag(&mut state, surf_drag, static_drag, thrust_sector, dt);
         let displacement = crate::collide::Solids::update_thing_physics(&mut state, dt, radius, height, gravity);
-        match self.update_move(&state, displacement, dt) {
-            crate::collide::UpdateMove::FindFloor => self.update_floor_attach(solids, index, &mut state, radius, height),
+        match contact.with(|rt| rt.update_move(&state, displacement, dt)) {
+            crate::collide::UpdateMove::FindFloor => {
+                Self::update_floor_attach(contact, solids, index, &mut state, radius, height);
+            }
             crate::collide::UpdateMove::Move { delta, flags } => {
-                self.move_gravity_body_sweep(solids, index, &mut state, delta, radius, height, flags);
+                Self::move_body_sweep(contact, solids, index, &mut state, delta, radius, height, flags);
             }
             crate::collide::UpdateMove::Hold => {}
         }
@@ -8153,36 +8196,35 @@ impl Runtime {
         let flat = (state.pos[0] - start[0]).hypot(state.pos[1] - start[1]);
         let crossed = state.sector != sector;
         let anchor = state.attach.and_then(|a| a.thing)
-            .and_then(|target| self.floor_local_anchor(target.thing, state.pos));
+            .and_then(|target| contact.with(|rt| rt.floor_local_anchor(target.thing, state.pos)));
         Some((state, flat, crossed, anchor))
     }
 
-    fn move_gravity_body_sweep(
-        &mut self, solids: &crate::collide::Solids, index: usize, state: &mut crate::collide::MoveState,
-        delta: [f32; 3], radius: f32, height: f32, flags: u32,
+
+    fn move_body_sweep(
+        contact: &mut ContactRuntime<'_>, solids: &crate::collide::Solids, index: usize,
+        state: &mut crate::collide::MoveState, delta: [f32; 3], radius: f32, height: f32, flags: u32,
     ) -> f32 {
-        let rt = std::cell::RefCell::new(self);
+        let rt = std::cell::RefCell::new(contact);
         solids.move_thing_with(
             state, delta, radius, flags,
             |state, dir, distance, radius, flags, search| {
                 search.exclude_thing(index);
-                solids.search_for_collisions(
-                    state.sector, Some(state), state.pos, dir, distance, radius, rt.borrow().gates(), flags, search,
-                );
+                rt.borrow_mut().with(|runtime| solids.search_for_collisions(
+                    state.sector, Some(state), state.pos, dir, distance, radius, runtime.gates(), flags, search,
+                ));
             },
-            |state, _, far| {
-                if state.sector != far && rt.borrow().sector_flags.get(far).is_some_and(|f| f & crate::collide::SECTOR_UNDERWATER != 0) {
-                    state.vel[2] *= 0.25; // `sithThing_EnterWater` (0x4cd370, 0x522e8c).
-                }
-                state.sector = far;
+            |state, surface, far| Self::thing_crossing(&mut rt.borrow_mut(), Some(index), state, surface, far),
+            |state| rt.borrow_mut().with(|runtime| solids.inside_sector_with_gates(state.sector, state.pos, 0.0, runtime.gates())),
+            |state| {
+                let mut contact = rt.borrow_mut();
+                Self::update_floor_attach(&mut contact, solids, index, state, radius, height);
             },
-            |state| solids.inside_sector_with_gates(state.sector, state.pos, 0.0, rt.borrow().gates()),
-            |state| rt.borrow_mut().update_floor_attach(solids, index, state, radius, height),
             |_, _| {},
             |state, hit, crease| {
                 // Specialized weapon surface/thing callbacks retain their earlier scope.
                 if state.kind == 3 { return solids.probe_contact(state, hit, crease); }
-                Self::solid_contact(solids, &mut ContactRuntime::Tick(&mut rt.borrow_mut()), Some(index), state, hit, crease)
+                Self::solid_contact(solids, &mut rt.borrow_mut(), Some(index), state, hit, crease)
             },
         )
     }
@@ -8190,12 +8232,21 @@ impl Runtime {
     /// `sithCollision_MoveThing`'s closing `sithPhysics_FindFloor(thing, 0)` (`0x4e7950:279-294`)
     /// for a non-player body, then the attach change it causes.
     fn update_floor_attach(
-        &mut self, solids: &crate::collide::Solids, index: usize, state: &mut crate::collide::MoveState,
-        radius: f32, height: f32,
+        contact: &mut ContactRuntime<'_>, solids: &crate::collide::Solids, index: usize,
+        state: &mut crate::collide::MoveState, radius: f32, height: f32,
     ) {
         let previous = state.attach;
-        solids.find_floor_for(state, radius, height, self.gates(), false, Some(index), self.thing_up(index));
-        self.floor_transition(state, previous, Some(index), false);
+        let (changed, landed) = contact.with(|rt| {
+            solids.find_floor_for(state, radius, height, rt.gates(), false, Some(index), rt.thing_up(index));
+            let landed = previous.is_none() && state.attach.is_some();
+            (rt.floor_transition(state, previous, Some(index), true), landed)
+        });
+        if changed {
+            contact.dispatch(state);
+            if landed && let Some(attach) = state.attach {
+                contact.with(|rt| rt.floor_landing(index, state, attach));
+            }
+        }
     }
 
     fn solid_contact(
@@ -8408,10 +8459,18 @@ impl Runtime {
 
     /// Publish a canonical contact once, then preserve untouched body coordinates bit-for-bit.
     fn player_move_phase(
-        world: &World, state: &mut crate::collide::MoveState, eye: f32, dispatch: &mut impl FnMut(),
+        world: &World, state: &mut crate::collide::MoveState, eye: f32, dispatch: &mut (impl FnMut() + ?Sized),
+    ) {
+        let index = world.borrow().local_player();
+        Self::move_phase(world, index, state, eye, dispatch);
+    }
+
+    fn move_phase(
+        world: &World, index: Option<usize>, state: &mut crate::collide::MoveState,
+        eye: f32, dispatch: &mut (impl FnMut() + ?Sized),
     ) {
         let published = [state.pos[0], state.pos[1], state.pos[2] + eye];
-        let Some(index) = world.borrow().local_player() else { return };
+        let Some(index) = index else { return };
         {
             let mut rt = world.borrow_mut();
             let thing = &mut rt.things[index];
@@ -8480,50 +8539,64 @@ impl Runtime {
         surface: Option<usize>, far: usize, dispatch: &mut impl FnMut(),
     ) {
         let player = world.borrow().local_player();
+        let mut rt = ContactRuntime::Player { world, eye, dispatch };
+        Self::thing_crossing(&mut rt, player, state, surface, far);
+    }
+
+    fn thing_crossing(
+        contact: &mut ContactRuntime<'_>, player: Option<usize>, state: &mut crate::collide::MoveState,
+        surface: Option<usize>, far: usize,
+    ) {
+        let eye = contact.position(state)[2] - state.pos[2];
         if let Some(surface) = surface {
-            {
-                let mut rt = world.borrow_mut();
+            contact.with(|rt| {
                 if rt.surface_flags.get(surface).is_some_and(|f| f & SITH_SURFACE_COG_LINKED != 0) {
                     rt.sith_cog_surface_send_message(surface, player, "crossed");
                 }
-            }
-            Self::player_move_phase(world, state, eye, dispatch);
+            });
+            contact.dispatch(state);
         }
         if state.sector == far {
             return;
         }
-        {
-            let mut rt = world.borrow_mut();
+        contact.with(|rt| {
             if state.flags & 0x80100 == 0
                 && rt.sector_flags.get(state.sector).is_some_and(|f| f & 4 != 0)
             {
                 rt.sith_cog_sector_send_message(state.sector, player, "exited");
             }
-        }
+        });
         let exit_position = state.pos.map(f32::to_bits);
         // ExitSector may warp the body and skip unlinking. SetSector still calls EnterSector.
-        Self::player_move_phase(world, state, eye, dispatch);
+        contact.dispatch(state);
         if state.pos.map(f32::to_bits) == exit_position && let Some(player) = player {
-            world.borrow_mut().things[player].sector = -1;
+            contact.with(|rt| rt.things[player].sector = -1);
         }
         state.sector = far;
-        let mut damp = false;
-        {
-            let mut rt = world.borrow_mut();
+        let wet = contact.with(|rt| {
             if let Some(player) = player {
                 rt.things[player].sector = far as i32;
             }
-            let wet = rt.sector_flags.get(far).is_some_and(|f| f & crate::collide::SECTOR_UNDERWATER != 0);
-            if wet && state.move_type == 1 {
-                let keep = player.and_then(|i| rt.things.get(i)).is_some_and(|t| t.attach_flags & 8 != 0);
-                if !keep {
-                    state.attach = None;
-                    if let Some(i) = player {
-                        rt.things[i].attach = None;
-                        rt.things[i].attach_flags = 0;
-                    }
+            rt.sector_flags.get(far).is_some_and(|f| f & crate::collide::SECTOR_UNDERWATER != 0)
+        });
+        if wet && state.move_type == 1 && state.attach_flags != 0 && state.attach_flags & 8 == 0 {
+            contact.with(|rt| {
+                let surface = state.attach.and_then(|a| a.surface);
+                let parent = state.attach.and_then(|a| a.thing).map(|hit| hit.thing)
+                    .or_else(|| player.and_then(|i| rt.things[i].attach));
+                rt.detach_support(player, surface, parent, state.flags, Some(&mut state.vel));
+                state.attach = None;
+                state.attach_flags = 0;
+                if let Some(i) = player {
+                    rt.things[i].attach = None;
+                    rt.things[i].floor_attach = None;
+                    rt.things[i].attach_flags = 0;
                 }
-            }
+            });
+            contact.dispatch(state);
+        }
+        let mut damp = false;
+        contact.with(|rt| {
             let was_wet = state.flags & 0x2000000 != 0;
             if wet != was_wet {
                 if wet {
@@ -8549,6 +8622,9 @@ impl Runtime {
                 }
                 if destroy {
                     state.flags |= 2;
+                    if let Some(index) = player {
+                        rt.things[index].destroyed = true;
+                    }
                     if state.flags & 0x400 != 0 && state.flags & 0x100 == 0
                         && let Some(player) = player
                     {
@@ -8556,10 +8632,11 @@ impl Runtime {
                     }
                 } else {
                     if state.flags & 0x20000000 != 0 && state.flags & 0x100 == 0
-                        && let Some(player) = player
+                        && let Some(mover) = player
+                        && let Some(player) = rt.local_player()
                     {
                         let identity = SourceSender {
-                            source_type: THING_SOURCE, source: player as i32, sender_type: 0,
+                            source_type: THING_SOURCE, source: mover as i32, sender_type: 0,
                             sender: i32::from(wet),
                         };
                         let scripts = [rt.thing_class_cog.get(&player).copied(), rt.thing_capture_cog.get(&player).copied()];
@@ -8570,20 +8647,19 @@ impl Runtime {
                     damp = wet;
                 }
             }
-        }
-        Self::player_move_phase(world, state, eye, dispatch);
+        });
+        contact.dispatch(state);
         if damp && state.move_type == 1 {
             state.vel[2] *= 0.25;
         }
-        {
-            let mut rt = world.borrow_mut();
+        contact.with(|rt| {
             if state.flags & 0x80100 == 0
                 && rt.sector_flags.get(state.sector).is_some_and(|f| f & 4 != 0)
             {
                 rt.sith_cog_sector_send_message(state.sector, player, "entered");
             }
-        }
-        Self::player_move_phase(world, state, eye, dispatch);
+        });
+        contact.dispatch(state);
     }
 
     /// Is a body standing in water at `feet`? Two rules, both the engine's: the surface under the
@@ -14845,7 +14921,8 @@ mod tests {
         rt.types = vec![0, 10, 0];
         let world = World::new(rt);
         let mut seen = None;
-        Runtime::sith_thing_update(&world, None, 0.1, || {
+        Runtime::sith_thing_update(&world, None, 0.1, |player| {
+            if !player { return; }
             let rt = world.borrow();
             seen = Some((rt.things[0].pos[0], rt.things[2].pos[0]));
         });
@@ -20695,17 +20772,17 @@ mod tests {
         rt.life_left.insert(1, 0.15);
         let world = World::new(rt);
         let mut player_steps = 0;
-        Runtime::sith_thing_update(&world, None, 0.1, || player_steps += 1);
+        Runtime::sith_thing_update(&world, None, 0.1, |player| if player { player_steps += 1 });
         assert_eq!(player_steps, 0);
         assert!(world.borrow().air_ms.get(&1).is_none());
         assert!((world.borrow().life_left[&1] - 0.05).abs() < 1e-5);
         world.borrow_mut().things[0].flags &= !0x80000;
         world.borrow_mut().things[1].flags &= !0x80000;
-        Runtime::sith_thing_update(&world, None, 0.01, || player_steps += 1);
+        Runtime::sith_thing_update(&world, None, 0.01, |player| if player { player_steps += 1 });
         assert_eq!(player_steps, 1);
         assert_eq!(world.borrow().air_ms.get(&1), Some(&10));
         world.borrow_mut().things[1].flags |= 0x80000;
-        Runtime::sith_thing_update(&world, None, 0.1, || player_steps += 1);
+        Runtime::sith_thing_update(&world, None, 0.1, |player| if player { player_steps += 1 });
         assert_eq!(world.borrow().types[1], 9, "disabled actor did not expire");
     }
 

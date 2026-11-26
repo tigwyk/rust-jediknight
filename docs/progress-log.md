@@ -8273,3 +8273,11 @@ remain in `ThingMotion::turned`, and the door diagnostic waits for either kind o
 verbs (`0x504c20`, `0x504c80`) modify individual bits. Attaching to a thing sets kind 4, and
 `AttachThingToThingEx` (`0x503600`) adds its flags. Collision rider recursion remains tracked in #149.
 
+
+## #148: synchronous non-player movement callbacks
+
+Non-player physics and path sweeps dispatch collision and sector messages while movement is in
+progress, with the world guard released. The mover's state is published before Cog execution and
+read back afterward. Sector crossings follow `sithCollision_MoveThing` (`0x4e7950`) and
+`sithThing_SetSector` (`0x4cd1e0`), including water transitions. Integration tests cover contact
+and crossing script changes and the player/other-thing update order.

@@ -29724,7 +29724,13 @@ fn sith_update(
     let step = control.as_ref().map_or(dt, |frame| frame.dt);
     let mut fired = 0;
     let mut crossed = false;
-    let motion = runtime::Runtime::sith_thing_update(&handle, geometry, dt, || {
+    let motion = runtime::Runtime::sith_thing_update(&handle, geometry, dt, |player_slot| {
+        if !player_slot {
+            if let Some(world) = world.as_deref() {
+                fired += pump_movement_messages(&world.cogs, &mut sim);
+            }
+            return;
+        }
         let (Some(input), Some(player), Some(solids), Some(world)) =
             (input, player.as_deref_mut(), collisions.as_deref(), world.as_deref())
         else {
@@ -31586,6 +31592,157 @@ mod registration_tests {
         assert_eq!(body.sector, 1);
         assert_eq!(body.vy, -1.0);
         assert_eq!(handle.borrow().adjoin_flags[0] & 2, 0);
+    }
+
+    #[test]
+    fn actor_crossing_runs_scripts_before_player_and_later_mover() {
+        let script = "symbols\nmessage crossed\nmessage exited\nmessage entered\nmessage splash\nend\ncode\n\
+            crossed:\nPrint(\"crossed\"); Print(GetSenderId()); Print(GetSenderRef()); Print(GetSourceRef());\n\
+            SetThingPos(GetSourceRef(), VectorAdd(GetThingPos(GetSourceRef()), '2 0 0'));\n\
+            SetThingVel(GetSourceRef(), VectorSet(0, 2, -4));\n\
+            SetThingVel(2, VectorSet(5, 0, 0));\nreturn;\n\
+            exited:\nPrint(\"exited\"); Print(VectorX(GetThingPos(GetSourceRef())));\n\
+            SetThingPos(GetSourceRef(), VectorAdd(GetThingPos(GetSourceRef()), '1 0 0'));\nreturn;\n\
+            entered:\nPrint(\"entered\"); Print(VectorX(GetThingPos(GetSourceRef())));\n\
+            Print(VectorZ(GetThingVel(GetSourceRef())));\n\
+            SetThingPos(GetSourceRef(), VectorAdd(GetThingPos(GetSourceRef()), '4 0.1 0'));\nreturn;\n\
+            splash:\nPrint(\"splash\"); Print(GetSenderRef());\nreturn;\nend\n";
+        let cogs = HashMap::from([("crossing.cog".to_string(), cog::parse(script).expect("parses"))]);
+        let mut level = jkl::Level { gravity: 0.0, ..Default::default() };
+        for (name, kind, pos, vel) in [
+            ("actor", "actor", [0.0, -0.01, 0.1], [0.0, 1.0, 0.0]),
+            ("walkplayer", "player", [0.0, -2.0, 0.1], [0.0; 3]),
+            ("actor", "actor", [-5.0, -2.0, 0.1], [0.0; 3]),
+        ] {
+            level.templates.push(jkl::Template {
+                name: name.into(), base: None, model3d: None, sprite: None,
+                params: vec![("type".into(), kind.into()), ("move".into(), "physics".into()),
+                    ("collide".into(), "1".into()), ("physflags".into(), "0x1".into()),
+                    ("mass".into(), "1".into())],
+            });
+            level.things.push(jkl::Thing {
+                template: name.into(), pos, sector: 0, flags: 0, type_flags: None, explosion_type_flags: 0,
+                pitch: 0.0, yaw: 0.0, roll: 0.0, frames: Vec::new(), vel, aiclass: None,
+            });
+        }
+        let verts = vec![[-10.0, 0.0, -10.0], [10.0, 0.0, -10.0], [10.0, 0.0, 10.0], [-10.0, 0.0, 10.0]];
+        let solids = collide::Solids {
+            sectors: vec![Vec::new(), Vec::new()],
+            portals: vec![
+                vec![collide::Portal { adjoin: 1, link: 0, verts: verts.clone(), normal: [0.0, 1.0, 0.0], point: [0.0; 3] }],
+                vec![collide::Portal { adjoin: 0, link: 1, verts: verts.into_iter().rev().collect(), normal: [0.0, -1.0, 0.0], point: [0.0; 3] }],
+            ],
+            adjoin_surface: vec![0, 1], surface_owner: vec![0, 1], surface_flags: vec![2, 2],
+            ..Default::default()
+        };
+        let handle = runtime::Runtime::handle(&level);
+        {
+            let mut rt = handle.borrow_mut();
+            rt.things[0].pos = [0.0, -0.01, 0.1];
+            rt.things[0].vel = [0.0, 1.0, 0.0];
+            rt.things[0].sector = 0;
+            rt.things[0].flags |= 0x20000000;
+            rt.thing_class_cog.insert(1, 0);
+            rt.things[2].pos = [-5.0, -2.0, 0.1];
+            rt.things[2].vel = [0.0; 3];
+            rt.things[2].sector = 0;
+            rt.sector_flags = vec![4, 6];
+            rt.adjoin_flags = vec![2, 2];
+            rt.surface_flags = vec![2, 2];
+            rt.surface_adjoin = vec![0, 1];
+            rt.surface_links = vec![(0, 7, 0)];
+            rt.sector_links = vec![(0, 9, 1), (0, 8, 0)];
+            rt.link_masks.insert((runtime::SURFACE_SOURCE, 0, 7, 0), 1 << 2);
+            rt.link_masks.insert((runtime::SECTOR_SOURCE, 0, 8, 0), 1 << 2);
+            rt.link_masks.insert((runtime::SECTOR_SOURCE, 0, 9, 1), 1 << 2);
+        }
+        let mut sim = Sim {
+            world: handle.clone(), instances: vec![("crossing.cog".into(), cog::Vm::with_world(handle.clone()))],
+            entities: HashMap::new(), elapsed: 0.0, reported: 0.0, escaped: Default::default(),
+        };
+        let mut player_observed = None;
+        let mut fired = 0;
+        runtime::Runtime::sith_thing_update(&handle, Some(&solids), 0.02, |player| {
+            if player {
+                let rt = handle.borrow();
+                player_observed = Some((rt.things[0].pos[0], rt.things[2].pos[0]));
+            } else {
+                fired += pump_movement_messages(&cogs, &mut sim);
+            }
+        });
+        assert_eq!(sim.instances[0].1.trace.prints, ["crossed", "7", "0", "0", "exited", "2", "splash", "0", "entered", "3", "-1"]);
+        assert_eq!(fired, 4);
+        assert_eq!(player_observed, Some((7.0, -5.0)));
+        let rt = handle.borrow();
+        assert_eq!(rt.things[0].pos[0], 7.0);
+        assert_eq!(rt.things[0].sector, 1);
+        assert_eq!(rt.things[0].vel[1], 2.0);
+        assert_eq!(rt.things[0].vel[2], -1.0);
+        assert_ne!(rt.things[0].flags & 0x2000000, 0);
+        assert!(rt.things[2].pos[0] > -5.0, "the later actor must move using the script's velocity");
+    }
+
+    #[test]
+    fn actor_solid_touch_runs_cog_at_contact_and_keeps_its_warp() {
+        let script = "symbols\nmessage touched\nend\ncode\ntouched:\n\
+            Print(GetSenderRef()); Print(GetSourceRef()); Print(VectorX(GetThingPos(GetSourceRef())));\n\
+            SetThingPos(GetSourceRef(), VectorAdd(GetThingPos(GetSourceRef()), '0 2 0'));\n\
+            SetThingVel(GetSourceRef(), VectorSet(0, 3, 0));\nreturn;\nend\n";
+        let cogs = HashMap::from([("touch.cog".to_string(), cog::parse(script).expect("parses"))]);
+        let mut level = jkl::Level { gravity: 0.0, ..Default::default() };
+        for (name, kind, pos, flags) in [
+            ("actor", "actor", [0.0, 0.0, 0.1], 0),
+            ("target", "actor", [0.5, 0.0, 0.1], 0x400),
+        ] {
+            level.templates.push(jkl::Template {
+                name: name.into(), base: None, model3d: None, sprite: None,
+                params: vec![("type".into(), kind.into()), ("move".into(), "physics".into()),
+                    ("collide".into(), "1".into()), ("physflags".into(), "0x1".into()),
+                    ("mass".into(), if name == "actor" { "1" } else { "0" }.into())],
+            });
+            level.things.push(jkl::Thing {
+                template: name.into(), pos, sector: 0, flags, type_flags: None, explosion_type_flags: 0,
+                pitch: 0.0, yaw: 0.0, roll: 0.0, frames: Vec::new(), vel: [0.0; 3], aiclass: None,
+            });
+        }
+        let solids = collide::Solids { sectors: vec![Vec::new()], ..Default::default() };
+        solids.set_things(vec![collide::ThingSolid {
+            index: 1, centre: [0.5, 0.0, 0.1], origin: [0.5, 0.0, 0.1],
+            sector: 0, radius: 0.125, z_min: 0.0, z_max: 0.2, half: None, yaw: 0.0,
+            mesh: None, thing_flags: 0x400, collide: 1, owner: None, kind: 2, item: false,
+        }]);
+        let handle = runtime::Runtime::handle(&level);
+        {
+            let mut rt = handle.borrow_mut();
+            rt.things[0].pos = [0.0, 0.0, 0.1];
+            rt.things[0].sector = 0;
+            rt.things[0].vel = [10.0, 0.0, 0.0];
+            rt.things[1].pos = [0.5, 0.0, 0.1];
+            rt.things[1].sector = 0;
+            rt.things[1].vel = [0.0; 3];
+            rt.things[1].flags |= 0x400;
+            rt.thing_links.push((0, 4, 1));
+            rt.link_masks.insert((runtime::THING_SOURCE, 0, 4, 1), 1 << 2);
+        }
+        let mut sim = Sim {
+            world: handle.clone(), instances: vec![("touch.cog".into(), cog::Vm::with_world(handle.clone()))],
+            entities: HashMap::new(), elapsed: 0.0, reported: 0.0, escaped: Default::default(),
+        };
+        let mut fired = 0;
+        runtime::Runtime::sith_thing_update(&handle, Some(&solids), 0.1, |player| {
+            if !player {
+                fired += pump_movement_messages(&cogs, &mut sim);
+            }
+        });
+        let prints = &sim.instances[0].1.trace.prints;
+        assert_eq!(prints.len(), 3, "the target must receive one touch");
+        assert_eq!(prints[..2], ["1", "0"]);
+        let contact_x = prints[2].parse::<f32>().expect("contact x");
+        assert!(contact_x > 0.0 && contact_x < 0.5, "script saw x={contact_x}, not the contact");
+        assert_eq!(fired, 1);
+        let rt = handle.borrow();
+        assert!(rt.things[0].pos[1] >= 2.0, "the sweep overwrote the script's warp");
+        assert_eq!(rt.things[0].vel[1], 3.0, "the sweep overwrote the script's velocity");
     }
 
     #[test]
