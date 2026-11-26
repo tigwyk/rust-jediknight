@@ -8267,3 +8267,9 @@ whose tick callbacks remain deferred and whose rider recursion is not yet ported
 Path rotation and pivot steps report a translation only when the position changes. Pure rotations
 remain in `ThingMotion::turned`, and the door diagnostic waits for either kind of motion.
 
+## #147: attachment flag Cog verbs
+
+`GetAttachFlags` and `GetThingAttachFlags` (`0x5034f0`) read the attachment word. The set and clear
+verbs (`0x504c20`, `0x504c80`) modify individual bits. Attaching to a thing sets kind 4, and
+`AttachThingToThingEx` (`0x503600`) adds its flags. Collision rider recursion remains tracked in #149.
+
