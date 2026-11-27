@@ -8288,3 +8288,10 @@ and crossing script changes and the player/other-thing update order.
 riders after containment. Attachment links and save restoration preserve rider order. Collision shapes
 now follow moving and rotating things during updates; scripted pose changes and newly created template
 shapes become visible to subsequent searches in the same update.
+
+The release build and port-only collision check pass. All nine default walk-preflight legs pass.
+Isolated comparisons against the committed traces meet the trace-gate thresholds on eight legs;
+`walk6_spawn` drifts on three of six sector samples, although travel is 1.06 versus 1.08 units.
+The all-level walk reports 32 of 34 starts contained; the same two `16aescapeship` and
+`16bescapeship` results were already documented in `docs/engineering.md`. No pre-#149 build was
+run for comparison with the trace drift.
