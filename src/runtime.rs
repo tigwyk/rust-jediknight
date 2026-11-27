@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use bevy::math::{Quat, Vec3};
+use bevy::math::Vec3;
 
 use crate::cog::Value;
 use crate::collide::{Gates, SECTOR_ADJOINS_OFF};
@@ -61,31 +61,117 @@ impl World {
     }
 }
 
-/// The player can release the runtime for scripts at a contact. Generic ticks already hold it,
-/// so they queue messages for the existing tick dispatch.
+/// Contact callbacks release the shared runtime before dispatching scripts.
 enum ContactRuntime<'a> {
     Player { world: &'a World, eye: f32, dispatch: &'a mut dyn FnMut() },
+    Mover { world: &'a World, index: usize, dispatch: &'a mut dyn FnMut() },
     Tick(&'a mut Runtime),
 }
 
 impl ContactRuntime<'_> {
     fn with<T>(&mut self, f: impl FnOnce(&mut Runtime) -> T) -> T {
         match self {
-            Self::Player { world, .. } => f(&mut world.borrow_mut()),
+            Self::Player { world, .. } | Self::Mover { world, .. } => f(&mut world.borrow_mut()),
             Self::Tick(rt) => f(rt),
         }
     }
 
     fn dispatch(&mut self, state: &mut crate::collide::MoveState) {
-        if let Self::Player { world, eye, dispatch } = self {
-            Runtime::player_move_phase(world, state, *eye, dispatch);
+        match self {
+            Self::Player { world, eye, dispatch } => {
+                let index = world.borrow().local_player();
+                Runtime::move_phase(world, index, state, *eye, dispatch);
+            }
+            Self::Mover { world, index, dispatch } => {
+                let rt = world.borrow();
+                let eye = if rt.local_player() == Some(*index) { rt.player_eye } else { 0.0 };
+                drop(rt);
+                Runtime::move_phase(world, Some(*index), state, eye, dispatch);
+            }
+            Self::Tick(_) => {}
         }
     }
 
-    fn position(&self, state: &crate::collide::MoveState) -> [f32; 3] {
+    fn position(&self, index: Option<usize>, state: &crate::collide::MoveState) -> [f32; 3] {
         let mut at = state.pos;
-        if let Self::Player { eye, .. } = self { at[2] += *eye; }
+        match self {
+            Self::Player { eye, .. } => at[2] += *eye,
+            Self::Mover { world, .. } => {
+                let rt = world.borrow();
+                if rt.local_player().is_some_and(|player| Some(player) == index) { at[2] += rt.player_eye; }
+            }
+            Self::Tick(rt) if rt.local_player().is_some_and(|player| Some(player) == index) => at[2] += rt.player_eye,
+            _ => {}
+        }
         at
+    }
+
+    fn sync_pose(&mut self, solids: &crate::collide::Solids, index: usize) {
+        self.with(|rt| {
+            let thing = &rt.things[index];
+            if let Ok(sector) = usize::try_from(thing.sector) {
+                solids.sync_thing_pose(index, thing.pos, sector, [thing.pitch, thing.yaw, thing.roll]);
+            }
+        });
+    }
+
+    fn sync_state(&mut self, solids: &crate::collide::Solids, index: usize, state: &crate::collide::MoveState) {
+        let pos = self.position(Some(index), state);
+        self.with(|rt| {
+            let thing = &rt.things[index];
+            solids.sync_thing_pose(index, pos, state.sector, [thing.pitch, thing.yaw, thing.roll]);
+        });
+    }
+
+    fn publish(&mut self, index: usize, state: &crate::collide::MoveState) {
+        let eye = match self {
+            Self::Player { eye, .. } => *eye,
+            Self::Mover { world, .. } => {
+                let rt = world.borrow();
+                if rt.local_player() == Some(index) { rt.player_eye } else { 0.0 }
+            }
+            Self::Tick(rt) if rt.local_player() == Some(index) => rt.player_eye,
+            _ => 0.0,
+        };
+        let pos = [state.pos[0], state.pos[1], state.pos[2] + eye];
+        self.with(|rt| {
+            let thing = &mut rt.things[index];
+            thing.pos = pos;
+            thing.sector = state.sector as i32;
+            thing.vel = state.vel;
+            thing.flags = state.flags;
+            thing.phys_flags = state.phys_flags;
+            thing.floor_attach = state.attach;
+            thing.attach_flags = state.attach_flags;
+        });
+    }
+
+    fn read_back(&mut self, index: usize, state: &mut crate::collide::MoveState) {
+        let eye = match self {
+            Self::Player { eye, .. } => *eye,
+            Self::Mover { world, .. } => {
+                let rt = world.borrow();
+                if rt.local_player() == Some(index) { rt.player_eye } else { 0.0 }
+            }
+            Self::Tick(rt) if rt.local_player() == Some(index) => rt.player_eye,
+            _ => 0.0,
+        };
+        self.with(|rt| {
+            let thing = &rt.things[index];
+            let published = [state.pos[0], state.pos[1], state.pos[2] + eye];
+            for axis in 0..3 {
+                if thing.pos[axis].to_bits() != published[axis].to_bits() {
+                    state.pos[axis] = thing.pos[axis] - if axis == 2 { eye } else { 0.0 };
+                }
+            }
+            if let Ok(sector) = usize::try_from(thing.sector) { state.sector = sector; }
+            state.vel = thing.vel;
+            state.flags = thing.flags;
+            state.phys_flags = thing.phys_flags;
+            state.attach = thing.floor_attach;
+            state.attach_flags = thing.attach_flags;
+            state.kind = rt.types.get(index).copied().unwrap_or(0) as u32;
+        });
     }
 }
 
@@ -330,6 +416,11 @@ pub struct ThingState {
     pub attach_offset: [f32; 3],
     /// `SetThingAttachFlags`: the stored attachment word; bit 0x2 is a thing face, and 0x8 holds movement.
     pub attach_flags: u32,
+    /// Parent and sibling links in the engine's attachment list.
+    pub attachment_parent: Option<usize>,
+    pub first_child: Option<usize>,
+    pub next_sibling: Option<usize>,
+    pub prev_sibling: Option<usize>,
     /// `RotatePivot`'s in-flight spin, if any.
     pub spin: Option<PivotSpin>,
     /// `SetThingRotVel`: `physicsParams.angularVelocity`, in degrees per second about the thing's
@@ -718,6 +809,15 @@ pub struct ThingSave {
     pub path: Option<(PathState, Option<(f32, f32)>, bool, Option<PivotSpin>)>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct AttachmentSave {
+    pub child: usize,
+    pub flags: u32,
+    pub parent: Option<usize>,
+    pub floor: Option<crate::collide::Attach>,
+    pub offset: [f32; 3],
+}
+
 /// A whole savegame: the things, what the player carries, and the clock.
 ///
 /// `sithGamesave.c` writes a thing record per thing plus the player block and the per-sector and
@@ -734,6 +834,7 @@ pub struct Snapshot {
     pub saber: Option<SaberInfo>,
     pub adjoin_flags: Vec<u16>,
     pub sector_light: Vec<f32>,
+    pub attachments: Option<Vec<AttachmentSave>>,
 }
 
 /// The snapshot's on-disk bytes. Little-endian, length-prefixed strings, one record per thing:
@@ -842,6 +943,35 @@ impl Snapshot {
                 }
             } else {
                 out.push(0);
+            }
+        }
+        if let Some(attachments) = &self.attachments {
+            out.extend_from_slice(b"BKA1");
+            out.extend_from_slice(&(attachments.len() as u32).to_le_bytes());
+            for attachment in attachments {
+                out.extend_from_slice(&(attachment.child as u32).to_le_bytes());
+                out.extend_from_slice(&attachment.flags.to_le_bytes());
+                out.extend_from_slice(&(attachment.parent.map_or(u32::MAX, |n| n as u32)).to_le_bytes());
+                out.push(u8::from(attachment.floor.is_some()));
+                if let Some(floor) = attachment.floor {
+                    for value in floor.normal.iter().chain(floor.point.iter()).chain([&floor.friction]) {
+                        out.extend_from_slice(&value.to_le_bytes());
+                    }
+                    out.extend_from_slice(&(floor.surface.map_or(u32::MAX, |n| n as u32)).to_le_bytes());
+                    if let Some(hit) = floor.thing {
+                        out.push(1);
+                        out.extend_from_slice(&(hit.thing as u32).to_le_bytes());
+                        out.push(u8::from(hit.mesh_face.is_some()));
+                        if let Some((mesh, face)) = hit.mesh_face {
+                            out.extend_from_slice(&(mesh as u32).to_le_bytes());
+                            out.extend_from_slice(&(face as u32).to_le_bytes());
+                        }
+                        out.push(u8::from(hit.item));
+                    } else {
+                        out.push(0);
+                    }
+                }
+                for value in attachment.offset { out.extend_from_slice(&value.to_le_bytes()); }
             }
         }
         out
@@ -965,8 +1095,57 @@ impl Snapshot {
                         _ => return None,
                     }
                 }
-                if at.at != data.len() {
-                    return None;
+                if at.at < data.len() {
+                    if at.take(4)? != b"BKA1" { return None; }
+                    let count = at.u32()? as usize;
+                    if count > save.things.len() { return None; }
+                    let mut attachments = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        let child = at.u32()? as usize;
+                        let flags = at.u32()?;
+                        let parent = match at.u32()? { u32::MAX => None, n => Some(n as usize) };
+                        let floor = match at.u8()? {
+                            0 => None,
+                            1 => {
+                                let normal = [at.f32()?, at.f32()?, at.f32()?];
+                                let point = [at.f32()?, at.f32()?, at.f32()?];
+                                let friction = at.f32()?;
+                                let surface = match at.u32()? { u32::MAX => None, n => Some(n as usize) };
+                                let thing = match at.u8()? {
+                                    0 => None,
+                                    1 => {
+                                        let thing = at.u32()? as usize;
+                                        let mesh_face = match at.u8()? {
+                                            0 => None,
+                                            1 => Some((at.u32()? as usize, at.u32()? as usize)),
+                                            _ => return None,
+                                        };
+                                        let item = match at.u8()? { 0 => false, 1 => true, _ => return None };
+                                        Some(crate::collide::ThingHit { thing, mesh_face, item })
+                                    }
+                                    _ => return None,
+                                };
+                                Some(crate::collide::Attach { normal, point, friction, surface, thing })
+                            }
+                            _ => return None,
+                        };
+                        let offset = [at.f32()?, at.f32()?, at.f32()?];
+                        if child >= save.things.len() || parent.is_some_and(|p| p >= save.things.len() || p == child)
+                            || floor.and_then(|f| f.thing).is_some_and(|hit| Some(hit.thing) != parent || hit.thing >= save.things.len())
+                            || attachments.iter().any(|entry: &AttachmentSave| entry.child == child)
+                        { return None; }
+                        attachments.push(AttachmentSave { child, flags, parent, floor, offset });
+                    }
+                    for attachment in &attachments {
+                        let mut parent = attachment.parent;
+                        for _ in 0..attachments.len() {
+                            let Some(index) = parent else { break };
+                            if index == attachment.child { return None; }
+                            parent = attachments.iter().find(|entry| entry.child == index).and_then(|entry| entry.parent);
+                        }
+                    }
+                    if at.at != data.len() { return None; }
+                    save.attachments = Some(attachments);
                 }
             }
         }
@@ -1741,6 +1920,9 @@ pub struct Runtime {
     /// and sends `blocked` — `SITH_MESSAGE_BLOCKED`, the eighth most common label on level 1 (x8) —
     /// which is what a door script uses to know a body is in the way.
     pub solids: Option<std::sync::Arc<crate::collide::Solids>>,
+    /// Model-space collision shapes for templates created after the frame begins.
+    pub collision_templates: std::collections::HashMap<String, crate::collide::ThingSolid>,
+    active_collision: Option<std::sync::Arc<std::sync::RwLock<Vec<crate::collide::ThingSolid>>>>,
     /// Whether `sithThing_Initialize`'s creation attach (`FindFloor(thing, 1)`) has run for the
     /// placed physics bodies — once, on the first step that has a collider.
     pub seated_load: bool,
@@ -2204,6 +2386,8 @@ pub struct Runtime {
     pub respawning: Vec<(usize, f32)>,
     /// Powerups the events slot brought back this frame, for the thing loop's `moved`.
     respawned: Vec<usize>,
+    player_eye: f32,
+    player_radius: f32,
     /// What the scripts actually changed, for the run report.
     pub adjoins_changes: usize,
     pub things_moved: usize,
@@ -2639,6 +2823,10 @@ impl Runtime {
                     owner: None,
                     attach_offset: [0.0; 3],
                     attach_flags: 0,
+                    attachment_parent: None,
+                    first_child: None,
+                    next_sibling: None,
+                    prev_sibling: None,
                     spin: None,
                     // The template's `angvel=` seeds the angular velocity; `ThingState::step`
                     // integrates it and the angles wrap.
@@ -2833,6 +3021,8 @@ impl Runtime {
             pending_messages: Vec::new(),
             last_activate: f32::NEG_INFINITY,
             solids: None,
+            collision_templates: Default::default(),
+            active_collision: None,
             seated_load: false,
             template_min_damage: level
                 .templates
@@ -3125,6 +3315,8 @@ impl Runtime {
                 .unwrap_or_else(|| "+bryarbolt".to_string()),
             respawning: Vec::new(),
             respawned: Vec::new(),
+            player_eye: crate::PLAYER_EYE,
+            player_radius: 0.065,
             adjoins_changes: 0,
             things_moved: 0,
         }
@@ -3223,6 +3415,47 @@ impl Runtime {
         self.scroll_epoch += 1;
     }
 
+    fn with_collision_things(&self, mut f: impl FnMut(&std::sync::RwLock<Vec<crate::collide::ThingSolid>>)) {
+        let stored = self.solids.as_ref().map(|solids| &solids.things);
+        if let Some(things) = stored { f(things); }
+        if let Some(things) = &self.active_collision {
+            if stored.is_none_or(|stored| !std::sync::Arc::ptr_eq(stored, things)) {
+                f(things);
+            }
+        }
+    }
+
+    fn sync_script_collider(&self, index: usize) {
+        let Some(thing) = self.things.get(index) else { return };
+        self.with_collision_things(|things| {
+            let sector = usize::try_from(thing.sector).unwrap_or(usize::MAX);
+            crate::collide::Solids::sync_thing_pose_in(
+                things, index, thing.pos, sector, [thing.pitch, thing.yaw, thing.roll],
+            );
+            let mut solids = things.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(solid) = solids.iter_mut().find(|solid| solid.index == index) {
+                solid.thing_flags = thing.flags;
+            }
+        });
+    }
+
+    fn register_collision_thing(&self, index: usize) {
+        let Some(thing) = self.things.get(index) else { return };
+        let Some(template) = self.templates.get(index) else { return };
+        let Some(prefab) = self.collision_templates.get(template) else { return };
+        let Ok(sector) = usize::try_from(thing.sector) else { return };
+        self.with_collision_things(|things| {
+            let mut solid = prefab.clone();
+            solid.index = index;
+            solid.thing_flags = thing.flags;
+            solid.owner = thing.owner;
+            crate::collide::Solids::insert_thing_in(things, solid);
+            crate::collide::Solids::sync_thing_pose_in(
+                things, index, thing.pos, sector, [thing.pitch, thing.yaw, thing.roll],
+            );
+        });
+    }
+
     /// Create a thing from a template at a pose: the one constructor `CreateThing` (marker-relative)
     /// and `CreateThingAtPos` (absolute) share, so the two cannot drift apart.
     fn spawn_at(&mut self, template: String, pos: [f32; 3], sector: i32, angles: [f32; 3]) -> usize {
@@ -3257,6 +3490,10 @@ impl Runtime {
             floor_attach: None,
             attach_offset: [0.0; 3],
             attach_flags: 0,
+            attachment_parent: None,
+            first_child: None,
+            next_sibling: None,
+            prev_sibling: None,
             spin: None,
             rot_vel: self.template_angvel.get(&template).copied().unwrap_or([0.0; 3]),
             paused: false,
@@ -3293,6 +3530,7 @@ impl Runtime {
             self.mass.insert(index, mass);
         }
         self.arm_life(index);
+        self.register_collision_thing(index);
         index
     }
 
@@ -3447,13 +3685,22 @@ impl Runtime {
         geometry: Option<&crate::collide::Solids>,
         dt: f32,
     ) -> ThingMotion {
+        let active = std::mem::replace(&mut self.active_collision, geometry.map(|solids| solids.things.clone()));
         self.sith_update_head(dt);
         self.sith_surface_tick(dt);
         let mut pass = self.thing_update_begin(geometry, dt);
         for index in 0..self.things.len() {
-            self.sith_thing_update_one(&mut pass, geometry, index);
+            if self.sith_thing_update_one(&mut pass, geometry, index) {
+                Self::thing_motion_with(&mut ContactRuntime::Tick(self), &mut pass, geometry, index);
+                self.sith_puppet_thing_key(&mut pass, index);
+                if let Some(solids) = geometry.or(pass.stored.as_deref()) {
+                    ContactRuntime::Tick(self).sync_pose(solids, index);
+                }
+            }
         }
-        self.thing_update_end(pass)
+        let result = self.thing_update_end(pass);
+        self.active_collision = active;
+        result
     }
 
     /// `sithUpdate`'s (`0x4c4c00:24-31`) slots before the AI: the time advance, the sound mixer
@@ -3529,8 +3776,12 @@ impl Runtime {
         world: &World,
         geometry: Option<&crate::collide::Solids>,
         dt: f32,
-        mut player: impl FnMut(),
+        mut callback: impl FnMut(bool),
     ) -> ThingMotion {
+        let active = {
+            let mut rt = world.borrow_mut();
+            std::mem::replace(&mut rt.active_collision, geometry.map(|solids| solids.things.clone()))
+        };
         let (mut pass, count) = {
             let mut rt = world.borrow_mut();
             let pass = rt.thing_update_begin(geometry, dt);
@@ -3539,12 +3790,24 @@ impl Runtime {
         };
         for index in 0..count {
             let active = world.borrow_mut().sith_thing_update_one(&mut pass, geometry, index);
-            if active && Some(index) == pass.player_at {
-                // `sithPhysics_UpdateThing` and `sithThing_UpdateMove` for the player's body.
-                player();
+            if active {
+                let mut dispatch = || callback(false);
+                let mut contact = ContactRuntime::Mover { world, index, dispatch: &mut dispatch };
+                Self::thing_motion_with(&mut contact, &mut pass, geometry, index);
+                world.borrow_mut().sith_puppet_thing_key(&mut pass, index);
+                if Some(index) == pass.player_at {
+                    callback(true);
+                }
+                if let Some(solids) = geometry.or(pass.stored.as_deref()) {
+                    let mut dispatch = || callback(false);
+                    ContactRuntime::Mover { world, index, dispatch: &mut dispatch }.sync_pose(solids, index);
+                }
             }
         }
-        world.borrow_mut().thing_update_end(pass)
+        let mut rt = world.borrow_mut();
+        let result = rt.thing_update_end(pass);
+        rt.active_collision = active;
+        result
     }
 
     /// The per-frame tables `sithThing_Update`'s loop reads, and the one-time load attach.
@@ -3705,12 +3968,7 @@ impl Runtime {
             _ if Some(i) == pass.player_at => self.sith_player_update(dt),
             _ => {}
         }
-        // 5. `sithPhysics_UpdateThing` (move=physics) or the frame path (move=path), then 6.
-        // `sithThing_UpdateMove` (`0x4cc4c0`) inside the physics body's move.
-        self.sith_thing_motion(pass, geometry, i);
-        // 7. The puppet slot (`sithPuppet_UpdatePuppet`, `0x4cc1e0:93`): the thing-track `PlayKey`.
-        // shortcut: the actors' animation input is still `animate_actors`' in the app.
-        self.sith_puppet_thing_key(pass, i);
+        // 5-7. Movement and the puppet slot run after releasing the runtime.
         true
     }
 
@@ -3808,6 +4066,7 @@ impl Runtime {
         let old = t.flags;
         t.flags |= 2;
         t.destroyed = true;
+        self.sync_script_collider(i);
         if old & 0x400 != 0 && old & 0x100 == 0 {
             self.sith_cog_thing_send_message(i, None, "removed");
         }
@@ -3845,10 +4104,7 @@ impl Runtime {
         if let Some(t) = self.things.get_mut(i) {
             t.flags |= 0x200;
         }
-        let children: Vec<usize> = (0..self.things.len())
-            .filter(|&c| self.things[c].attach == Some(i))
-            .collect();
-        for child in children {
+        while let Some(child) = self.things[i].first_child {
             self.sith_thing_detach_thing(child);
         }
         if let Some(kind) = self.types.get_mut(i) {
@@ -3891,12 +4147,13 @@ impl Runtime {
     /// support's velocity and sending `exited` as [`Self::detach_support`] does.
     fn sith_thing_detach_thing(&mut self, i: usize) {
         let Some(t) = self.things.get(i) else { return };
-        let (seat, parent, flags, mut vel) = (t.floor_attach, t.attach, t.flags, t.vel);
+        let (seat, parent, flags, mut vel) = (t.floor_attach, t.attach.or(t.attachment_parent), t.flags, t.vel);
         if seat.is_none() && parent.is_none() {
             return;
         }
         let support = parent.or(seat.and_then(|a| a.thing.map(|hit| hit.thing)));
         self.detach_support(Some(i), seat.and_then(|a| a.surface), support, flags, Some(&mut vel));
+        self.unlink_attachment(i);
         let t = &mut self.things[i];
         t.vel = vel;
         t.floor_attach = None;
@@ -3913,6 +4170,7 @@ impl Runtime {
     /// and the port's creation appends a new slot instead of popping the free stack
     /// (`sithThing_CreateThingAtPos`, `0x4cd9e0`); upgrade when thing indices must match retail's.
     fn sith_thing_free_destroyed(&mut self, i: usize) {
+        self.with_collision_things(|things| crate::collide::Solids::remove_thing_in(things, i));
         self.sith_thing_detach_thing(i);
         let (sector, flags) = (self.things[i].sector, self.things[i].flags);
         if let Ok(s) = usize::try_from(sector) {
@@ -3977,48 +4235,189 @@ impl Runtime {
         }
     }
 
-    fn sweep_path(&mut self, solids: Option<&crate::collide::Solids>, index: usize, radius: f32, delta: [f32; 3]) -> f32 {
+    fn move_without_geometry(&mut self, index: usize, delta: [f32; 3]) {
+        if delta == [0.0; 3] { return; }
+        let mut child = self.things[index].first_child;
+        while let Some(i) = child {
+            child = self.things[i].next_sibling;
+            if self.things[i].attach_flags & 8 == 0 {
+                self.move_without_geometry(i, delta);
+            }
+        }
         let thing = &mut self.things[index];
+        for (position, shift) in thing.pos.iter_mut().zip(delta) { *position += shift; }
+        if !self.respawned.contains(&index) { self.respawned.push(index); }
+        let parent = &self.things[index];
+        let (pos, sector, angles) = (parent.pos, parent.sector, [parent.pitch, parent.yaw, parent.roll]);
+        let mut child = parent.first_child;
+        while let Some(i) = child {
+            let thing = &mut self.things[i];
+            child = thing.next_sibling;
+            if thing.attach_flags & 8 != 0 {
+                thing.pos = (Vec3::from(pos) + Vec3::from(rotate_by_angles(thing.attach_offset, angles[0], angles[1], angles[2]))).to_array();
+                thing.sector = sector;
+                if !self.respawned.contains(&i) { self.respawned.push(i); }
+            }
+        }
+    }
+
+    fn rotate_riders(
+        contact: &mut ContactRuntime<'_>, pass: &mut ThingPass,
+        solids: Option<&crate::collide::Solids>, parent: usize, old: [f32; 3], new: [f32; 3], path_rotation: bool,
+    ) {
+        if old == new { return; }
+        if path_rotation {
+            contact.with(|rt| {
+                let thing = &mut rt.things[parent];
+                [thing.pitch, thing.yaw, thing.roll] = old;
+            });
+        }
+        if let Some(solids) = solids { contact.sync_pose(solids, parent); }
+        let transform = |v: [f32; 3]| {
+            let v = Vec3::from(v);
+            let local = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+                .map(|axis| v.dot(Vec3::from(rotate_by_angles(axis, old[0], old[1], old[2]))));
+            rotate_by_angles(local, new[0], new[1], new[2])
+        };
+        let mut child = contact.with(|rt| rt.things[parent].first_child);
+        while let Some(index) = child {
+            let (next, child_old, parent_pos, child_pos) = contact.with(|rt| {
+                let t = &rt.things[index];
+                (t.next_sibling, [t.pitch, t.yaw, t.roll], rt.things[parent].pos, t.pos)
+            });
+            let r = transform(rotate_by_angles([1.0, 0.0, 0.0], child_old[0], child_old[1], child_old[2]));
+            let l = transform(rotate_by_angles([0.0, 1.0, 0.0], child_old[0], child_old[1], child_old[2]));
+            let u = transform(rotate_by_angles([0.0, 0.0, 1.0], child_old[0], child_old[1], child_old[2]));
+            let child_new = [l[2].clamp(-1.0, 1.0).asin().to_degrees(), (-l[0]).atan2(l[1]).to_degrees(), (-r[2]).atan2(u[2]).to_degrees()];
+            let relative = Vec3::from(child_pos) - Vec3::from(parent_pos);
+            let delta = (Vec3::from(transform(relative.to_array())) - relative).to_array();
+            if !path_rotation {
+                contact.with(|rt| {
+                    let t = &mut rt.things[index];
+                    [t.pitch, t.yaw, t.roll] = child_new;
+                });
+                if let Some(solids) = solids { contact.sync_pose(solids, index); }
+                if !pass.turned.contains(&index) { pass.turned.push(index); }
+                Self::rotate_riders(contact, pass, solids, index, child_old, child_new, false);
+            }
+            if path_rotation || contact.with(|rt| rt.things[index].attach_flags & 8 == 0) {
+                let prepared = contact.with(|rt| {
+                    let t = &rt.things[index];
+                    let sector = usize::try_from(t.sector).ok()?;
+                    let name = rt.templates.get(index).map(String::as_str).unwrap_or("");
+                    let is_player = rt.local_player() == Some(index);
+                    let eye = if is_player { rt.player_eye } else { 0.0 };
+                    let radius = if is_player { rt.player_radius } else { rt.template_hit.get(name).map_or(0.065, |v| v.0) };
+                    Some((crate::collide::MoveState {
+                        pos: [t.pos[0], t.pos[1], t.pos[2] - eye], sector, vel: t.vel,
+                        remainder: [0.0; 3], phys_flags: t.phys_flags,
+                        kind: rt.types.get(index).copied().unwrap_or(0) as u32,
+                        move_type: rt.floor_parent_move(index), collide: rt.template_collide.get(name).copied().unwrap_or(0),
+                        flags: t.flags, attach: t.floor_attach, attach_flags: t.attach_flags,
+                        owner: t.owner, water_surface: None,
+                    }, radius, rt.thing_height(Some(index), radius), eye, is_player))
+                });
+                if let (Some(solids), Some((mut state, radius, height, eye, is_player))) = (solids, prepared) {
+                    match contact {
+                        ContactRuntime::Player { world, dispatch, .. } | ContactRuntime::Mover { world, dispatch, .. } => {
+                            let mut child_contact = if is_player {
+                                ContactRuntime::Player { world, eye, dispatch: &mut **dispatch }
+                            } else {
+                                ContactRuntime::Mover { world, index, dispatch: &mut **dispatch }
+                            };
+                            Self::move_body_sweep(&mut child_contact, solids, index, &mut state, delta, radius, height, if path_rotation { 0x40 } else { 0 });
+                        }
+                        ContactRuntime::Tick(rt) => {
+                            Self::move_body_sweep(&mut ContactRuntime::Tick(rt), solids, index, &mut state, delta, radius, height, if path_rotation { 0x40 } else { 0 });
+                        }
+                    }
+                    contact.with(|rt| {
+                        let thing = &mut rt.things[index];
+                        thing.pos = [state.pos[0], state.pos[1], state.pos[2] + eye];
+                        thing.sector = state.sector as i32;
+                        thing.vel = state.vel;
+                        thing.flags = state.flags;
+                        thing.phys_flags = state.phys_flags;
+                        thing.floor_attach = state.attach;
+                        thing.attach_flags = state.attach_flags;
+                    });
+                    if state.pos != [child_pos[0], child_pos[1], child_pos[2] - eye] && !pass.moved.contains(&index) { pass.moved.push(index); }
+                } else {
+                    contact.with(|rt| rt.move_without_geometry(index, delta));
+                }
+            }
+            if path_rotation {
+                Self::rotate_riders(contact, pass, solids, index, child_old, child_new, true);
+                contact.with(|rt| {
+                    if rt.floor_parent_move(index) == 1 { rt.things[index].phys_flags &= !0x100; }
+                });
+                if !pass.turned.contains(&index) { pass.turned.push(index); }
+            }
+            child = if path_rotation { next } else { contact.with(|rt| rt.things[index].next_sibling) };
+        }
+        if path_rotation {
+            contact.with(|rt| {
+                let thing = &mut rt.things[parent];
+                [thing.pitch, thing.yaw, thing.roll] = new;
+            });
+        }
+        if let Some(solids) = solids { contact.sync_pose(solids, parent); }
+    }
+
+    fn sweep_path(contact: &mut ContactRuntime<'_>, solids: Option<&crate::collide::Solids>, index: usize, radius: f32, delta: [f32; 3]) -> f32 {
         let requested = Vec3::from(delta).length();
-        if let Some(solids) = solids
-            && let Ok(sector) = usize::try_from(thing.sector)
-            && sector < solids.sectors.len()
-        {
-            let name = self.templates.get(index).map(String::as_str).unwrap_or("");
-            let mut state = crate::collide::MoveState {
-                pos: thing.pos, sector, vel: thing.vel, remainder: [0.0; 3],
-                phys_flags: thing.phys_flags, kind: self.types.get(index).copied().unwrap_or(0) as u32,
-                move_type: 2, collide: self.template_collide.get(name).copied().unwrap_or(0),
+        let mut state = contact.with(|rt| {
+            let thing = &rt.things[index];
+            let sector = usize::try_from(thing.sector).ok()?;
+            if sector >= solids?.sectors.len() { return None; }
+            let name = rt.templates.get(index).map(String::as_str).unwrap_or("");
+            let eye = if rt.local_player() == Some(index) { rt.player_eye } else { 0.0 };
+            Some(crate::collide::MoveState {
+                pos: [thing.pos[0], thing.pos[1], thing.pos[2] - eye], sector, vel: thing.vel, remainder: [0.0; 3],
+                phys_flags: thing.phys_flags, kind: rt.types.get(index).copied().unwrap_or(0) as u32,
+                move_type: 2, collide: rt.template_collide.get(name).copied().unwrap_or(0),
                 flags: thing.flags, attach: thing.floor_attach, attach_flags: thing.attach_flags,
                 owner: thing.owner, water_surface: None,
-            };
-            let traveled = self.move_gravity_body_sweep(solids, index, &mut state, delta, radius, 0.0, 0x44);
-            let thing = &mut self.things[index];
-            thing.pos = state.pos;
+            })
+        });
+        if let (Some(solids), Some(state)) = (solids, &mut state) {
+            let traveled = Self::move_body_sweep(contact, solids, index, state, delta, radius, 0.0, 0x44);
+            contact.with(|rt| {
+            let eye = if rt.local_player() == Some(index) { rt.player_eye } else { 0.0 };
+            let thing = &mut rt.things[index];
+            thing.pos = [state.pos[0], state.pos[1], state.pos[2] + eye];
             thing.sector = state.sector as i32;
+            thing.vel = state.vel;
+            thing.flags = state.flags;
+            thing.phys_flags = state.phys_flags;
+            thing.floor_attach = state.attach;
+            thing.attach_flags = state.attach_flags;
+            });
             traveled
         } else {
-            for (position, delta) in thing.pos.iter_mut().zip(delta) { *position += delta; }
+            contact.with(|rt| rt.move_without_geometry(index, delta));
             requested
         }
     }
 
     /// Pivot rotation precedes path translation in `sithTrackThing_Tick` (`0x4faf00`).
-    fn sith_path_pivot(&mut self, pass: &mut ThingPass, solids: Option<&crate::collide::Solids>, index: usize) {
-        let thing = &self.things[index];
-        let previous = thing.pos;
-        if thing.paused || pass.dt == 0.0 { return; }
-        let Some(mut spin) = thing.spin.clone() else { return };
+    fn sith_path_pivot(contact: &mut ContactRuntime<'_>, pass: &mut ThingPass, solids: Option<&crate::collide::Solids>, index: usize) {
+        let initial = contact.with(|rt| {
+            let thing = &rt.things[index];
+            if thing.paused || pass.dt == 0.0 { return None; }
+            Some((thing.pos, [thing.pitch, thing.yaw, thing.roll], thing.spin.clone()?))
+        });
+        let Some((previous, old_angles, mut spin)) = initial else { return };
         let old_done = spin.done;
         let mut done = (old_done + pass.dt).min(spin.duration);
         let offset = (Vec3::from(spin.start_pos) - Vec3::from(spin.centre)).to_array();
         let angles = spin.angles.map(|angle| angle * (done / spin.duration));
         let (offset, mut orientation) = crate::path_rotation::pivot_pose(spin.start_angles, offset, angles, false);
         let desired = Vec3::from(spin.centre) + Vec3::from(offset);
-        let delta = (desired - Vec3::from(thing.pos)).to_array();
+        let delta = (desired - Vec3::from(previous)).to_array();
         let distance = Vec3::from(delta).length();
         if distance > 0.00001 {
-            let traveled = self.sweep_path(solids, index, pass.body_radius[index], delta);
+            let traveled = Self::sweep_path(contact, solids, index, pass.body_radius[index], delta);
             if traveled < distance {
                 done = old_done + (done - old_done) * traveled / distance;
                 let angles = spin.angles.map(|angle| angle * (done / spin.duration));
@@ -4026,7 +4425,8 @@ impl Runtime {
                 orientation = crate::path_rotation::pivot_pose(spin.start_angles, offset, angles, true).1;
             }
         }
-        let thing = &mut self.things[index];
+        contact.with(|rt| {
+        let thing = &mut rt.things[index];
         [thing.pitch, thing.yaw, thing.roll] = orientation;
         spin.done = done;
         thing.spin = if done >= spin.duration { None } else { Some(spin) };
@@ -4036,49 +4436,105 @@ impl Runtime {
         }
         if thing.pos != previous && !pass.moved.contains(&index) { pass.moved.push(index); }
         if !pass.turned.contains(&index) { pass.turned.push(index); }
+        });
+        Self::rotate_riders(contact, pass, solids, index, old_angles, orientation, true);
     }
 
     /// `sithTrackThing_Tick` (`0x4faf00`) sweeps before consuming path time.
-    fn sith_path_motion(&mut self, pass: &mut ThingPass, solids: Option<&crate::collide::Solids>, index: usize) {
-        let thing = &mut self.things[index];
-        let previous = thing.pos;
-        let rotating = thing.path.rotation.active && !thing.paused;
-        let Some((delta, elapsed)) = thing.begin_path_step(pass.dt) else { return };
+    fn sith_path_motion(contact: &mut ContactRuntime<'_>, pass: &mut ThingPass, solids: Option<&crate::collide::Solids>, index: usize) {
+        let initial = contact.with(|rt| {
+            let thing = &mut rt.things[index];
+            let previous = thing.pos;
+            let old_angles = [thing.pitch, thing.yaw, thing.roll];
+            let rotating = thing.path.rotation.active && !thing.paused;
+            let (delta, elapsed) = thing.begin_path_step(pass.dt)?;
+            Some((previous, old_angles, [thing.pitch, thing.yaw, thing.roll], rotating, delta, elapsed))
+        });
+        let Some((previous, old_angles, new_angles, rotating, delta, elapsed)) = initial else { return };
+        Self::rotate_riders(contact, pass, solids, index, old_angles, new_angles, true);
         let requested = Vec3::from(delta).length();
-        let traveled = self.sweep_path(solids, index, pass.body_radius[index], delta);
-        let thing = &mut self.things[index];
+        let traveled = Self::sweep_path(contact, solids, index, pass.body_radius[index], delta);
+        contact.with(|rt| {
+        let thing = &mut rt.things[index];
         thing.finish_path_step(elapsed, requested, traveled);
         let blocked = thing.path.moving && thing.path.blocked > 2 && thing.flags & 0x400 != 0 && thing.flags & 0x100 == 0;
         if thing.pos != previous && !pass.moved.contains(&index) { pass.moved.push(index); }
         if rotating && !pass.turned.contains(&index) { pass.turned.push(index); }
         if blocked {
             pass.blocked.push(index);
-            for instance in self.thing_instances(index) {
-                self.pending_messages.push((instance, "blocked", [0.0; 2], None, None));
+            for instance in rt.thing_instances(index) {
+                rt.pending_messages.push((instance, "blocked", [0.0; 2], None, None));
             }
         }
+        });
     }
 
     /// `sithPhysics_UpdateThing` or the frame path, and the move.
-    fn sith_thing_motion(
-        &mut self,
-        pass: &mut ThingPass,
-        geometry: Option<&crate::collide::Solids>,
-        i: usize,
-    ) {
-        let dt = pass.dt;
-        if self.floor_parent_move(i) == 2 {
-            let stored = pass.stored.clone();
-            let seat_geometry = geometry.or(stored.as_deref());
-            self.sith_path_pivot(pass, seat_geometry, i);
-            self.sith_path_motion(pass, seat_geometry, i);
-            self.sith_track_thing_arrived(pass, i);
+    fn thing_motion_with(contact: &mut ContactRuntime<'_>, pass: &mut ThingPass, geometry: Option<&crate::collide::Solids>, i: usize) {
+        let stored = pass.stored.clone();
+        let solids = geometry.or(stored.as_deref());
+        if contact.with(|rt| rt.floor_parent_move(i)) == 2 {
+            Self::sith_path_pivot(contact, pass, solids, i);
+            Self::sith_path_motion(contact, pass, solids, i);
+            contact.with(|rt| rt.sith_track_thing_arrived(pass, i));
             return;
         }
-        let seat_geometry = geometry.or(pass.stored.as_deref());
+        let (previous, old_angles) = contact.with(|rt| {
+            let thing = &rt.things[i];
+            (thing.pos, [thing.pitch, thing.yaw, thing.roll])
+        });
         let seat = if Some(i) == pass.player_at { None } else {
-            seat_geometry.and_then(|solids| self.move_gravity_body(solids, i, dt, pass.body_radius[i], &pass.thrust))
+            solids.and_then(|solids| Self::move_gravity_body(contact, solids, i, pass.dt, pass.body_radius[i], &pass.thrust))
+                .or_else(|| Self::move_fallback_parent(contact, solids, i, pass.dt, pass.body_radius[i], &pass.thrust))
         };
+        contact.with(|rt| rt.sith_thing_motion(pass, i, seat, previous));
+        let new_angles = contact.with(|rt| {
+            let thing = &rt.things[i];
+            [thing.pitch, thing.yaw, thing.roll]
+        });
+        Self::rotate_riders(contact, pass, solids, i, old_angles, new_angles, false);
+    }
+
+    fn move_fallback_parent(
+        contact: &mut ContactRuntime<'_>, solids: Option<&crate::collide::Solids>, index: usize,
+        dt: f32, radius: f32, thrust: &[[f32; 3]],
+    ) -> Option<(crate::collide::MoveState, f32, bool, Option<[f32; 3]>)> {
+        let (mut state, height) = contact.with(|rt| {
+            let thing = &rt.things[index];
+            if thing.first_child.is_none() || thing.destroyed { return None; }
+            let sector = usize::try_from(thing.sector).ok()?;
+            let name = rt.templates.get(index).map(String::as_str).unwrap_or("");
+            let mut vel = thing.vel;
+            if thing.phys_flags & 0x400000 == 0 && let Some(drive) = thrust.get(sector) {
+                for (value, drive) in vel.iter_mut().zip(drive) { *value += drive * dt; }
+            }
+            Some((crate::collide::MoveState {
+                pos: thing.pos, sector, vel, remainder: [0.0; 3], phys_flags: thing.phys_flags,
+                kind: rt.types.get(index).copied().unwrap_or(0) as u32,
+                move_type: rt.floor_parent_move(index), collide: rt.template_collide.get(name).copied().unwrap_or(0),
+                flags: thing.flags, attach: thing.floor_attach, attach_flags: thing.attach_flags,
+                owner: thing.owner, water_surface: None,
+            }, rt.thing_height(Some(index), radius)))
+        })?;
+        let start = state.pos;
+        let sector = state.sector;
+        let delta = state.vel.map(|v| v * dt);
+        if let Some(solids) = solids {
+            Self::move_body_sweep(contact, solids, index, &mut state, delta, radius, height, 0);
+        } else {
+            contact.with(|rt| rt.move_without_geometry(index, delta));
+            state.pos = contact.with(|rt| rt.things[index].pos);
+        }
+        let flat = (state.pos[0] - start[0]).hypot(state.pos[1] - start[1]);
+        let crossed = sector != state.sector;
+        Some((state, flat, crossed, None))
+    }
+
+    fn sith_thing_motion(
+        &mut self, pass: &mut ThingPass, i: usize,
+        seat: Option<(crate::collide::MoveState, f32, bool, Option<[f32; 3]>)>, previous: [f32; 3],
+    ) {
+        let dt = pass.dt;
         let moved = &mut pass.moved;
         let turned = &mut pass.turned;
         let t = &mut self.things[i];
@@ -4096,12 +4552,13 @@ impl Runtime {
         // MoveThing already ran the body's sweep and FindFloor tail.
         if let Some((state, flat, crossed, anchor)) = seat {
             let attach_flipped = t.floor_attach.is_some() != state.attach.is_some();
-            let fell = (state.pos[2] - t.pos[2]).abs() > 1e-9;
+            let fell = (state.pos[2] - previous[2]).abs() > 1e-9;
             t.pos = state.pos;
             t.sector = state.sector as i32;
             t.vel = state.vel;
             t.floor_attach = state.attach;
             t.attach_flags = state.attach_flags;
+            t.flags = state.flags;
             t.phys_flags = state.phys_flags;
             if let Some(anchor) = anchor { t.attach_offset = anchor; }
             let rotating = t.rot_vel != [0.0; 3];
@@ -4322,11 +4779,12 @@ impl Runtime {
         pass.moved.push(thing);
     }
 
-    /// After `sithThing_Update`'s loop: the attached things follow their parents. shortcut: a
-    /// remainder — the engine pushes riders inside the parent's `MoveThing`.
+    /// Finish the thing update and report all moved things.
     fn thing_update_end(&mut self, pass: ThingPass) -> ThingMotion {
         let ThingPass { mut moved, turned, blocked, arrived, .. } = pass;
-        self.update_attachments(&mut moved);
+        for index in std::mem::take(&mut self.respawned) {
+            if !moved.contains(&index) { moved.push(index); }
+        }
         self.things_moved += moved.len();
         ThingMotion {
             moved,
@@ -4336,35 +4794,6 @@ impl Runtime {
         }
     }
 
-    /// Place every attached thing at `parent.position + parent.rotation * offset`, and carry the
-    /// parent's facing, which is what makes an attached thing *ride* rather than float.
-    ///
-    /// `ponytail:` one level deep and in index order, so a chain of attachments resolves only when
-    /// the parent has a lower index — the engine walks a child list instead. No shipped script
-    /// attaches a thing to a thing that is itself attached.
-    fn update_attachments(&mut self, moved: &mut Vec<usize>) {
-        for index in 0..self.things.len() {
-            let Some(parent) = self.things[index].attach else { continue };
-            let Some(from) = self.things.get(parent).map(|p| (p.pos, p.yaw, p.sector)) else {
-                continue;
-            };
-            let offset = self.things[index].attach_offset;
-            // The parent's own rotation, in this world's convention: a positive yaw turns +Y toward
-            // -X (see `yaw_axes` in the renderer), which is `from_rotation_z(+yaw)`.
-            let turn = Quat::from_rotation_z(from.1.to_radians());
-            let orbited = Vec3::from(from.0) + turn * Vec3::from(offset);
-            let next = [orbited.x, orbited.y, orbited.z];
-            let sector = from.2;
-            if let Some(thing) = self.things.get_mut(index) {
-                thing.pos = next;
-                thing.yaw = from.1;
-                thing.sector = sector;
-            }
-            if !moved.contains(&index) {
-                moved.push(index);
-            }
-        }
-    }
 
     /// The switched flags, for the solver: what `SetAdjoinFlags`/`ClearAdjoinFlags` and
     /// `SetSectorAdjoins`/`SetSectorFlags` have done to the world so far.
@@ -7741,6 +8170,30 @@ impl Runtime {
         self.game_clock += std::time::Duration::from_secs_f32(dt.clamp(0.01, 0.5));
     }
 
+    pub fn set_player_collision(&mut self, eye: f32, radius: f32) {
+        self.player_eye = eye;
+        self.player_radius = radius;
+    }
+
+    pub fn sync_player_body(world: &World, body: &mut PlayerBody) {
+        let rt = world.borrow();
+        let Some(index) = rt.local_player() else { return };
+        let thing = &rt.things[index];
+        body.pos = Vec3::new(thing.pos[0], thing.pos[1], thing.pos[2] - body.eye);
+        if let Ok(sector) = usize::try_from(thing.sector) {
+            body.sector = sector;
+        }
+        body.attach = thing.floor_attach;
+        body.floor_anchor = thing.floor_attach.and_then(|a| a.thing)
+            .map(|parent| (parent.thing, thing.attach_offset));
+        if thing.vel.map(f32::to_bits) != body.published_vel.map(f32::to_bits) {
+            body.vel = [thing.vel[0], thing.vel[1]];
+            body.vy = thing.vel[2];
+            body.published_vel = thing.vel;
+        }
+        body.published_pose = Some((thing.pos, body.sector));
+    }
+
     /// Advance the player body from one frame's input through attached/unattached physics and
     /// `MoveThing`, releasing the runtime for synchronous contact scripts. Seating, scrolling carry,
     /// thrust, the water state, run/walk scaling, drag, the fixed sub-step count, target assembly, jump,
@@ -7758,6 +8211,11 @@ impl Runtime {
         dt: f32,
         dispatch: impl FnMut(),
     ) -> bool {
+        let active = {
+            let mut rt = world.borrow_mut();
+            rt.active_collision.replace(solids.things.clone())
+        };
+        world.borrow_mut().set_player_collision(body.eye, rules.radius);
         // A script can move the body: `force_jump.cog`'s `SetThingVel(player, ...)` lands on the
         // player thing, and the walker consumes it as a one-shot impulse.
         {
@@ -7774,7 +8232,7 @@ impl Runtime {
                     for axis in 0..3 {
                         if thing.pos[axis].to_bits() != published[axis].to_bits() {
                             pos[axis] = if axis == 2 { thing.pos[axis] - body.eye } else { thing.pos[axis] };
-                            body.attach = None;
+                            if thing.attachment_parent.is_none() { body.attach = None; }
                         }
                     }
                     body.pos = Vec3::from(pos);
@@ -7814,7 +8272,6 @@ impl Runtime {
             let rt = world.borrow();
             rt.thing_height(rt.local_player(), radius)
         };
-        let thrusting = along != 0.0 || across != 0.0;
         // `SetSectorThrust` is half of a conveyor: `sithPhysics.c` adds `sector->thrust * dt` to a
         // body's velocity exactly like gravity, so an updraft column lifts what stands in it —
         // level 21's core tube is `'0.0 0.0 1.0'` at 4 to 5, level 10's power core pushes the body out.
@@ -7829,36 +8286,6 @@ impl Runtime {
         let mut state = world.borrow().player_move_state(body, body.sector, body.pos.to_array(),
             [body.vel[0], body.vel[1], body.vy]);
         let dispatch = std::cell::RefCell::new(dispatch);
-        // `MoveThing` pushes riders with search flag 0x40 (0x4e7950:61-77). The runtime has
-        // already advanced the parent's path, so move the rider by its changed anchor now.
-        if let Some(previous) = state.attach.filter(|a| a.thing.is_some()) {
-            let anchor = body.floor_anchor.filter(|(index, _)| Some(*index) == previous.thing.map(|t| t.thing))
-                .map(|(_, anchor)| anchor);
-            let ride = world.borrow().floor_rider_motion(solids, previous, state.pos, anchor);
-            if let Some((attach, carry)) = ride {
-                state.attach = Some(attach);
-                let carry = if state.attach_flags & 8 == 0 { carry } else { [0.0; 3] };
-                solids.move_thing_with(
-                    &mut state, carry, radius, 0x40,
-                    |state, dir, distance, radius, flags, search| {
-                        solids.search_for_collisions(state.sector, Some(state), state.pos, dir,
-                            distance, radius, world.borrow().gates(), flags, search);
-                    },
-                    |state, surface, far| Self::player_crossing(world, state, body.eye, surface, far, &mut *dispatch.borrow_mut()),
-                    |state| solids.inside_sector_with_gates(state.sector, state.pos, 0.0, world.borrow().gates()),
-                    |_| {},
-                    |state, item| Self::sith_item_player_touch(world, solids, state, body.eye, item, &mut *dispatch.borrow_mut()),
-                    |state, hit, crease| {
-                        let mut dispatch = dispatch.borrow_mut();
-                        let mover = world.borrow().local_player();
-                        let mut rt = ContactRuntime::Player { world, eye: body.eye, dispatch: &mut *dispatch };
-                        Self::solid_contact(solids, &mut rt, mover, state, hit, crease)
-                    },
-                );
-            } else {
-                Self::player_detach_floor(world, &mut state, body.eye, &mut *dispatch.borrow_mut());
-            }
-        }
         // A jump inherits the surface or parent's velocity on detach (0x4ce380).
         if input.jump && body.grounded {
             state.vel[2] = rules.jump_velocity(input.crouch);
@@ -7931,11 +8358,30 @@ impl Runtime {
                 crate::collide::UpdateMove::Move { delta, flags } => (delta, flags),
                 _ => ([0.0; 3], 0),
             };
+            let player = world.borrow().local_player();
+            let delta = if let Some(index) = player {
+                let mut dispatch = dispatch.borrow_mut();
+                let mut contact = ContactRuntime::Player { world, eye: body.eye, dispatch: &mut *dispatch };
+                let reduced = Self::move_riders(&mut contact, solids, index, &mut state, delta);
+                if reduced == [0.0; 3] && delta != [0.0; 3] {
+                    Self::place_rigid_riders(&mut contact, solids, index, &mut state);
+                }
+                reduced
+            } else { delta };
             let traveled = solids.move_thing_with(
                 &mut state, delta, radius, move_flags,
                 |state, dir, distance, radius, flags, search| {
                     let rt = world.borrow();
-                    if let Some(index) = rt.local_player() { search.exclude_thing(index); }
+                    if let Some(index) = rt.local_player() {
+                        solids.sync_thing_pose(index, [state.pos[0], state.pos[1], state.pos[2] + body.eye], state.sector,
+                            [rt.things[index].pitch, rt.things[index].yaw, rt.things[index].roll]);
+                        search.exclude_thing(index);
+                        if (flags & 0x40 != 0 || state.attach_flags & 8 != 0)
+                            && let Some(parent) = rt.things[index].attachment_parent
+                        {
+                            search.exclude_thing(parent);
+                        }
+                    }
                     solids.search_for_collisions(
                         state.sector, Some(state), state.pos, dir, distance, radius,
                         Gates { sectors: &rt.sector_flags, adjoins: &rt.adjoin_flags },
@@ -7951,6 +8397,13 @@ impl Runtime {
                         state.sector, state.pos, 0.0,
                         Gates { sectors: &rt.sector_flags, adjoins: &rt.adjoin_flags },
                     )
+                },
+                |state| {
+                    if let Some(index) = player {
+                        let mut dispatch = dispatch.borrow_mut();
+                        let mut contact = ContactRuntime::Player { world, eye: body.eye, dispatch: &mut *dispatch };
+                        Self::place_rigid_riders(&mut contact, solids, index, state);
+                    }
                 },
                 |_| { find_floor = true; },
                 |state, item| {
@@ -8064,7 +8517,12 @@ impl Runtime {
             }
             rt.publish_player(body);
             body.published_pose = rt.local_player().map(|i| (rt.things[i].pos, body.sector));
+            if let Some(index) = rt.local_player() {
+                let thing = &rt.things[index];
+                solids.sync_thing_pose(index, thing.pos, body.sector, [thing.pitch, thing.yaw, thing.roll]);
+            }
         }
+        world.borrow_mut().active_collision = active;
         crossed
     }
 
@@ -8077,9 +8535,10 @@ impl Runtime {
         crate::collide::MoveState {
             pos, sector, vel, remainder: [0.0; 3], attach: body.attach,
             water_surface: body.water_surface,
-            attach_flags: body.attach.map_or(0, |a| {
-                thing.map_or(0, |t| t.attach_flags & 8) | if a.surface.is_some() { 1 } else { 2 }
-            }),
+            attach_flags: body.attach.map_or_else(
+                || thing.map_or(0, |t| if t.attach.is_some() { t.attach_flags } else { 0 }),
+                |a| thing.map_or(0, |t| t.attach_flags & 8) | if a.surface.is_some() { 1 } else { 2 },
+            ),
             kind: player.map_or(10, |i| self.types.get(i).copied().unwrap_or(0) as u32),
             move_type: name.map_or(1, |n| match self.template_move.get(n).map(String::as_str) {
                 Some("physics") => 1, Some("path") => 2, _ => 0,
@@ -8092,10 +8551,10 @@ impl Runtime {
     }
 
     /// The generic gravity tick's `sithPhysics_UpdateThing` -> `sithCollision_MoveThing`.
-    fn move_gravity_body(
+    fn prepare_gravity_body(
         &mut self, solids: &crate::collide::Solids, index: usize, dt: f32,
         radius: f32, thrust: &[[f32; 3]],
-    ) -> Option<(crate::collide::MoveState, f32, bool, Option<[f32; 3]>)> {
+    ) -> Option<(crate::collide::MoveState, [f32; 3], usize, f32, f32, f32, f32, [f32; 3], bool)> {
         let t = &self.things[index];
         let kind = self.types.get(index).copied()? as u32;
         let name = self.templates.get(index)?;
@@ -8122,28 +8581,24 @@ impl Runtime {
         if t.phys_flags & 0x400000 == 0 && let Some(drive) = thrust.get(sector) {
             for (v, drive) in state.vel.iter_mut().zip(drive) { *v += drive * dt; }
         }
-        let previous = state.attach;
-        let mut carry = [0.0; 3];
-        if let Some(attach) = previous.filter(|a| a.thing.is_some()) {
-            if let Some((attach, displacement)) = self.floor_rider_motion(solids, attach, start, Some(t.attach_offset)) {
-                state.attach = Some(attach);
-                if state.attach_flags & 8 == 0 { carry = displacement; }
-            } else {
-                state.attach = None;
-                state.attach_flags = 0;
-                self.floor_transition(&mut state, previous, Some(index), false);
-            }
-        }
-        if carry != [0.0; 3] {
-            self.move_gravity_body_sweep(solids, index, &mut state, carry, radius, height, 0x40);
-        }
+        Some((state, start, sector, height, gravity, surf_drag, static_drag, [0.0; 3], false))
+    }
+
+    fn move_gravity_body(
+        contact: &mut ContactRuntime<'_>, solids: &crate::collide::Solids, index: usize, dt: f32,
+        radius: f32, thrust: &[[f32; 3]],
+    ) -> Option<(crate::collide::MoveState, f32, bool, Option<[f32; 3]>)> {
+        let (mut state, start, sector, height, gravity, surf_drag, static_drag, _, _) =
+            contact.with(|rt| rt.prepare_gravity_body(solids, index, dt, radius, thrust))?;
         let thrust_sector = thrust.get(sector).is_some_and(|drive| *drive != [0.0; 3]);
         crate::collide::Solids::apply_attached_drag(&mut state, surf_drag, static_drag, thrust_sector, dt);
         let displacement = crate::collide::Solids::update_thing_physics(&mut state, dt, radius, height, gravity);
-        match self.update_move(&state, displacement, dt) {
-            crate::collide::UpdateMove::FindFloor => self.update_floor_attach(solids, index, &mut state, radius, height),
+        match contact.with(|rt| rt.update_move(&state, displacement, dt)) {
+            crate::collide::UpdateMove::FindFloor => {
+                Self::update_floor_attach(contact, solids, index, &mut state, radius, height);
+            }
             crate::collide::UpdateMove::Move { delta, flags } => {
-                self.move_gravity_body_sweep(solids, index, &mut state, delta, radius, height, flags);
+                Self::move_body_sweep(contact, solids, index, &mut state, delta, radius, height, flags);
             }
             crate::collide::UpdateMove::Hold => {}
         }
@@ -8153,49 +8608,253 @@ impl Runtime {
         let flat = (state.pos[0] - start[0]).hypot(state.pos[1] - start[1]);
         let crossed = state.sector != sector;
         let anchor = state.attach.and_then(|a| a.thing)
-            .and_then(|target| self.floor_local_anchor(target.thing, state.pos));
+            .and_then(|target| contact.with(|rt| rt.floor_local_anchor(target.thing, state.pos)));
         Some((state, flat, crossed, anchor))
     }
 
-    fn move_gravity_body_sweep(
-        &mut self, solids: &crate::collide::Solids, index: usize, state: &mut crate::collide::MoveState,
-        delta: [f32; 3], radius: f32, height: f32, flags: u32,
+
+    fn move_riders(
+        contact: &mut ContactRuntime<'_>, solids: &crate::collide::Solids, parent: usize,
+        parent_state: &mut crate::collide::MoveState, delta: [f32; 3],
+    ) -> [f32; 3] {
+        let mut distance = Vec3::from(delta).length();
+        if distance == 0.0 { return delta; }
+        let direction = Vec3::from(delta) / distance;
+        contact.publish(parent, parent_state);
+        contact.sync_state(solids, parent, parent_state);
+        let mut child = contact.with(|rt| rt.things[parent].first_child);
+        while let Some(index) = child {
+            let flags = contact.with(|rt| rt.things[index].attach_flags);
+            if flags & 8 == 0 {
+                let prepared = contact.with(|rt| {
+                    let thing = &rt.things[index];
+                    let sector = usize::try_from(thing.sector).ok()?;
+                    let name = rt.templates.get(index).map(String::as_str).unwrap_or("");
+                    let is_player = rt.local_player() == Some(index);
+                    let eye = if is_player { rt.player_eye } else { 0.0 };
+                    let mut pos = thing.pos;
+                    pos[2] -= eye;
+                    let radius = if is_player { rt.player_radius } else { rt.template_hit.get(name).map_or(0.065, |v| v.0) };
+                    let height = rt.thing_height(Some(index), radius);
+                    let move_type = match rt.template_move.get(name).map(String::as_str) {
+                        Some("physics") => 1, Some("path") => 2, _ => 0,
+                    };
+                    Some((crate::collide::MoveState {
+                        pos, sector, vel: thing.vel, remainder: [0.0; 3], phys_flags: thing.phys_flags,
+                        kind: rt.types.get(index).copied().unwrap_or(0) as u32, move_type,
+                        collide: rt.template_collide.get(name).copied().unwrap_or(0), flags: thing.flags,
+                        attach: thing.floor_attach, attach_flags: thing.attach_flags, owner: thing.owner,
+                        water_surface: None,
+                    }, radius, height, eye, is_player))
+                });
+                if let Some((mut state, radius, height, eye, is_player)) = prepared {
+                    let start = state.pos;
+                    let displacement = (direction * distance).to_array();
+                    let traveled = match contact {
+                        ContactRuntime::Player { world, dispatch, .. } | ContactRuntime::Mover { world, dispatch, .. } => {
+                            let mut child_contact = if is_player {
+                                ContactRuntime::Player { world, eye, dispatch: &mut **dispatch }
+                            } else {
+                                ContactRuntime::Mover { world, index, dispatch: &mut **dispatch }
+                            };
+                            Self::move_body_sweep(&mut child_contact, solids, index, &mut state, displacement, radius, height, 0x40)
+                        }
+                        ContactRuntime::Tick(rt) => {
+                            Self::move_body_sweep(&mut ContactRuntime::Tick(rt), solids, index, &mut state, displacement, radius, height, 0x40)
+                        }
+                    };
+                    contact.read_back(parent, parent_state);
+                    contact.with(|rt| {
+                        let thing = &mut rt.things[index];
+                        thing.pos = [state.pos[0], state.pos[1], state.pos[2] + eye];
+                        thing.sector = state.sector as i32;
+                        thing.vel = state.vel;
+                        thing.flags = state.flags;
+                        thing.phys_flags = state.phys_flags;
+                        thing.floor_attach = state.attach;
+                        thing.attach_flags = state.attach_flags;
+                        if state.pos != start && !rt.respawned.contains(&index) { rt.respawned.push(index); }
+                    });
+                    contact.sync_pose(solids, index);
+                    contact.sync_state(solids, parent, parent_state);
+                    if traveled < distance {
+                        let blocks = contact.with(|rt| rt.things[index].attach_flags) & 2 == 0 || state.attach.and_then(|a| a.thing)
+                            .and_then(|hit| solids.thing_face_attach(hit))
+                            .is_some_and(|a| Vec3::from(a.normal).dot(direction) > 0.00001);
+                        if blocks {
+                            if contact.with(|rt| rt.things[parent].flags & 0x800 == 0) {
+                                contact.with(|rt| { rt.damage_typed_from(index as i64, (distance - traveled) * 100.0, 1, parent as i64); });
+                                match contact {
+                                    ContactRuntime::Player { world, dispatch, .. } | ContactRuntime::Mover { world, dispatch, .. } => {
+                                        let mut child_contact = if is_player {
+                                            ContactRuntime::Player { world, eye, dispatch: &mut **dispatch }
+                                        } else {
+                                            ContactRuntime::Mover { world, index, dispatch: &mut **dispatch }
+                                        };
+                                        child_contact.dispatch(&mut state);
+                                    }
+                                    ContactRuntime::Tick(_) => {}
+                                }
+                                contact.read_back(parent, parent_state);
+                                contact.sync_state(solids, parent, parent_state);
+                                contact.sync_pose(solids, index);
+                            }
+                            distance = traveled;
+                        }
+                    }
+                }
+            }
+            child = contact.with(|rt| rt.things[index].next_sibling);
+        }
+        (direction * distance).to_array()
+    }
+
+    fn place_rigid_riders(contact: &mut ContactRuntime<'_>, solids: &crate::collide::Solids, parent: usize, state: &mut crate::collide::MoveState) {
+        let player_eye = match contact {
+            ContactRuntime::Player { eye, .. } => *eye,
+            ContactRuntime::Mover { world, .. } => {
+                let rt = world.borrow();
+                if rt.local_player() == Some(parent) { rt.player_eye } else { 0.0 }
+            }
+            ContactRuntime::Tick(rt) if rt.local_player() == Some(parent) => rt.player_eye,
+            _ => 0.0,
+        };
+        contact.publish(parent, state);
+        contact.sync_state(solids, parent, state);
+        let mut child = contact.with(|rt| rt.things[parent].first_child);
+        while let Some(index) = child {
+            let prepared = contact.with(|rt| {
+                let thing = &rt.things[index];
+                if thing.attach_flags & 8 == 0 { return None; }
+                let source = &rt.things[parent];
+                let pos = [state.pos[0], state.pos[1], state.pos[2] + player_eye];
+                let next = (Vec3::from(pos) + Vec3::from(rotate_by_angles(thing.attach_offset, source.pitch, source.yaw, source.roll))).to_array();
+                let is_player = rt.local_player() == Some(index);
+                let eye = if is_player { rt.player_eye } else { 0.0 };
+                let name = rt.templates.get(index).map(String::as_str).unwrap_or("");
+                let move_state = crate::collide::MoveState {
+                    pos: [next[0], next[1], next[2] - eye],
+                    sector: usize::try_from(thing.sector).unwrap_or(state.sector), vel: thing.vel,
+                    remainder: [0.0; 3], phys_flags: thing.phys_flags,
+                    kind: rt.types.get(index).copied().unwrap_or(0) as u32,
+                    move_type: rt.floor_parent_move(index), collide: rt.template_collide.get(name).copied().unwrap_or(0),
+                    flags: thing.flags, attach: thing.floor_attach, attach_flags: thing.attach_flags,
+                    owner: thing.owner, water_surface: None,
+                };
+                Some((next, eye, is_player, move_state))
+            });
+            let Some((next, eye, is_player, mut child_state)) = prepared else {
+                child = contact.with(|rt| rt.things[index].next_sibling);
+                continue;
+            };
+            contact.with(|rt| {
+                if rt.things[index].pos != next || rt.things[index].sector != state.sector as i32 {
+                    rt.things[index].pos = next;
+                    if !rt.respawned.contains(&index) { rt.respawned.push(index); }
+                }
+            });
+            contact.with(|rt| {
+                let thing = &rt.things[index];
+                solids.sync_thing_pose(index, next, child_state.sector, [thing.pitch, thing.yaw, thing.roll]);
+            });
+            if child_state.sector != state.sector {
+                match contact {
+                    ContactRuntime::Player { world, dispatch, .. } | ContactRuntime::Mover { world, dispatch, .. } => {
+                        let mut child_contact = if is_player {
+                            ContactRuntime::Player { world, eye, dispatch: &mut **dispatch }
+                        } else {
+                            ContactRuntime::Mover { world, index, dispatch: &mut **dispatch }
+                        };
+                        Self::thing_crossing(&mut child_contact, Some(index), &mut child_state, None, state.sector);
+                    }
+                    ContactRuntime::Tick(rt) => {
+                        Self::thing_crossing(&mut ContactRuntime::Tick(rt), Some(index), &mut child_state, None, state.sector);
+                    }
+                }
+                contact.read_back(parent, state);
+                contact.with(|rt| {
+                    let thing = &mut rt.things[index];
+                    thing.pos = [child_state.pos[0], child_state.pos[1], child_state.pos[2] + eye];
+                    thing.sector = child_state.sector as i32;
+                    thing.vel = child_state.vel;
+                    thing.flags = child_state.flags;
+                    thing.floor_attach = child_state.attach;
+                    thing.attach_flags = child_state.attach_flags;
+                });
+            }
+            contact.sync_pose(solids, index);
+            contact.sync_state(solids, parent, state);
+            child = contact.with(|rt| rt.things[index].next_sibling);
+        }
+    }
+
+    fn move_body_sweep(
+        contact: &mut ContactRuntime<'_>, solids: &crate::collide::Solids, index: usize,
+        state: &mut crate::collide::MoveState, delta: [f32; 3], radius: f32, height: f32, flags: u32,
     ) -> f32 {
-        let rt = std::cell::RefCell::new(self);
-        solids.move_thing_with(
+        let requested = delta;
+        let delta = Self::move_riders(contact, solids, index, state, delta);
+        if delta == [0.0; 3] && requested != [0.0; 3] {
+            Self::place_rigid_riders(contact, solids, index, state);
+            return 0.0;
+        }
+        let rt = std::cell::RefCell::new(contact);
+        let traveled = solids.move_thing_with(
             state, delta, radius, flags,
             |state, dir, distance, radius, flags, search| {
                 search.exclude_thing(index);
-                solids.search_for_collisions(
-                    state.sector, Some(state), state.pos, dir, distance, radius, rt.borrow().gates(), flags, search,
-                );
+                rt.borrow_mut().sync_state(solids, index, state);
+                rt.borrow_mut().with(|runtime| {
+                    if flags & 0x40 != 0 || state.attach_flags & 8 != 0 {
+                        if let Some(parent) = runtime.things[index].attachment_parent {
+                            search.exclude_thing(parent);
+                        }
+                    }
+                    solids.search_for_collisions(
+                        state.sector, Some(state), state.pos, dir, distance, radius, runtime.gates(), flags, search,
+                    );
+                });
             },
-            |state, _, far| {
-                if state.sector != far && rt.borrow().sector_flags.get(far).is_some_and(|f| f & crate::collide::SECTOR_UNDERWATER != 0) {
-                    state.vel[2] *= 0.25; // `sithThing_EnterWater` (0x4cd370, 0x522e8c).
+            |state, surface, far| Self::thing_crossing(&mut rt.borrow_mut(), Some(index), state, surface, far),
+            |state| rt.borrow_mut().with(|runtime| solids.inside_sector_with_gates(state.sector, state.pos, 0.0, runtime.gates())),
+            |state| Self::place_rigid_riders(&mut rt.borrow_mut(), solids, index, state),
+            |state| {
+                let mut contact = rt.borrow_mut();
+                Self::update_floor_attach(&mut contact, solids, index, state, radius, height);
+            },
+            |state, item| {
+                if let ContactRuntime::Player { world, eye, dispatch } = &mut **rt.borrow_mut() {
+                    Self::sith_item_player_touch(world, solids, state, *eye, item, &mut **dispatch);
                 }
-                state.sector = far;
             },
-            |state| solids.inside_sector_with_gates(state.sector, state.pos, 0.0, rt.borrow().gates()),
-            |state| rt.borrow_mut().update_floor_attach(solids, index, state, radius, height),
-            |_, _| {},
             |state, hit, crease| {
                 // Specialized weapon surface/thing callbacks retain their earlier scope.
                 if state.kind == 3 { return solids.probe_contact(state, hit, crease); }
-                Self::solid_contact(solids, &mut ContactRuntime::Tick(&mut rt.borrow_mut()), Some(index), state, hit, crease)
+                Self::solid_contact(solids, &mut rt.borrow_mut(), Some(index), state, hit, crease)
             },
-        )
+        );
+        rt.borrow_mut().sync_state(solids, index, state);
+        traveled
     }
 
     /// `sithCollision_MoveThing`'s closing `sithPhysics_FindFloor(thing, 0)` (`0x4e7950:279-294`)
     /// for a non-player body, then the attach change it causes.
     fn update_floor_attach(
-        &mut self, solids: &crate::collide::Solids, index: usize, state: &mut crate::collide::MoveState,
-        radius: f32, height: f32,
+        contact: &mut ContactRuntime<'_>, solids: &crate::collide::Solids, index: usize,
+        state: &mut crate::collide::MoveState, radius: f32, height: f32,
     ) {
         let previous = state.attach;
-        solids.find_floor_for(state, radius, height, self.gates(), false, Some(index), self.thing_up(index));
-        self.floor_transition(state, previous, Some(index), false);
+        let (changed, landed) = contact.with(|rt| {
+            solids.find_floor_for(state, radius, height, rt.gates(), false, Some(index), rt.thing_up(index));
+            let landed = previous.is_none() && state.attach.is_some();
+            (rt.floor_transition(state, previous, Some(index), true), landed)
+        });
+        if changed {
+            contact.dispatch(state);
+            if landed && let Some(attach) = state.attach {
+                contact.with(|rt| rt.floor_landing(index, state, attach));
+            }
+        }
     }
 
     fn solid_contact(
@@ -8294,6 +8953,7 @@ impl Runtime {
                     state.attach = None;
                     state.attach_flags = 0;
                     if let Some(mover) = mover {
+                        rt.unlink_attachment(mover);
                         rt.things[mover].attach = None;
                         rt.things[mover].floor_attach = None;
                         rt.things[mover].attach_flags = 0;
@@ -8308,6 +8968,7 @@ impl Runtime {
                     let parent = t.floor_attach.and_then(|a| a.thing).map(|hit| hit.thing).or(t.attach);
                     let flags = t.flags;
                     rt.detach_support(Some(target), surface, parent, flags, Some(vel));
+                    rt.unlink_attachment(target);
                     let t = &mut rt.things[target];
                     t.floor_attach = None;
                     t.attach = None;
@@ -8376,7 +9037,7 @@ impl Runtime {
         rt: &mut ContactRuntime<'_>, mover: Option<usize>, state: &mut crate::collide::MoveState, damage: f32,
     ) {
         let Some(mover) = mover else { return };
-        let at = rt.position(state);
+        let at = rt.position(Some(mover), state);
         rt.with(|rt| {
             let thing = &mut rt.things[mover];
             thing.pos = at;
@@ -8401,17 +9062,25 @@ impl Runtime {
         if speed > 0.15 && let Some(mover) = mover { // 0x523020
             // `0x2e`/`0x2f`, table `0x54b40c`; 0x523014 caps the gain.
             let mode = if metal { "hitmetal" } else { "hithard" };
-            let at = rt.position(state);
+            let at = rt.position(Some(mover), state);
             rt.with(|rt| rt.queue_first_mode_sound(mover, mode, at, speed.min(1.0)));
         }
     }
 
     /// Publish a canonical contact once, then preserve untouched body coordinates bit-for-bit.
     fn player_move_phase(
-        world: &World, state: &mut crate::collide::MoveState, eye: f32, dispatch: &mut impl FnMut(),
+        world: &World, state: &mut crate::collide::MoveState, eye: f32, dispatch: &mut (impl FnMut() + ?Sized),
+    ) {
+        let index = world.borrow().local_player();
+        Self::move_phase(world, index, state, eye, dispatch);
+    }
+
+    fn move_phase(
+        world: &World, index: Option<usize>, state: &mut crate::collide::MoveState,
+        eye: f32, dispatch: &mut (impl FnMut() + ?Sized),
     ) {
         let published = [state.pos[0], state.pos[1], state.pos[2] + eye];
-        let Some(index) = world.borrow().local_player() else { return };
+        let Some(index) = index else { return };
         {
             let mut rt = world.borrow_mut();
             let thing = &mut rt.things[index];
@@ -8446,7 +9115,7 @@ impl Runtime {
     /// `0x4fbe10`: player flag, item-to-player LOS, strict millisecond deadline, send, stamp.
     fn sith_item_player_touch(
         world: &World, solids: &crate::collide::Solids, state: &mut crate::collide::MoveState,
-        eye: f32, item: usize, dispatch: &mut impl FnMut(),
+        eye: f32, item: usize, dispatch: &mut (impl FnMut() + ?Sized),
     ) {
         if state.flags & 0x100 != 0 {
             return;
@@ -8480,50 +9149,65 @@ impl Runtime {
         surface: Option<usize>, far: usize, dispatch: &mut impl FnMut(),
     ) {
         let player = world.borrow().local_player();
+        let mut rt = ContactRuntime::Player { world, eye, dispatch };
+        Self::thing_crossing(&mut rt, player, state, surface, far);
+    }
+
+    fn thing_crossing(
+        contact: &mut ContactRuntime<'_>, player: Option<usize>, state: &mut crate::collide::MoveState,
+        surface: Option<usize>, far: usize,
+    ) {
+        let eye = contact.position(player, state)[2] - state.pos[2];
         if let Some(surface) = surface {
-            {
-                let mut rt = world.borrow_mut();
+            contact.with(|rt| {
                 if rt.surface_flags.get(surface).is_some_and(|f| f & SITH_SURFACE_COG_LINKED != 0) {
                     rt.sith_cog_surface_send_message(surface, player, "crossed");
                 }
-            }
-            Self::player_move_phase(world, state, eye, dispatch);
+            });
+            contact.dispatch(state);
         }
         if state.sector == far {
             return;
         }
-        {
-            let mut rt = world.borrow_mut();
+        contact.with(|rt| {
             if state.flags & 0x80100 == 0
                 && rt.sector_flags.get(state.sector).is_some_and(|f| f & 4 != 0)
             {
                 rt.sith_cog_sector_send_message(state.sector, player, "exited");
             }
-        }
+        });
         let exit_position = state.pos.map(f32::to_bits);
         // ExitSector may warp the body and skip unlinking. SetSector still calls EnterSector.
-        Self::player_move_phase(world, state, eye, dispatch);
+        contact.dispatch(state);
         if state.pos.map(f32::to_bits) == exit_position && let Some(player) = player {
-            world.borrow_mut().things[player].sector = -1;
+            contact.with(|rt| rt.things[player].sector = -1);
         }
         state.sector = far;
-        let mut damp = false;
-        {
-            let mut rt = world.borrow_mut();
+        let wet = contact.with(|rt| {
             if let Some(player) = player {
                 rt.things[player].sector = far as i32;
             }
-            let wet = rt.sector_flags.get(far).is_some_and(|f| f & crate::collide::SECTOR_UNDERWATER != 0);
-            if wet && state.move_type == 1 {
-                let keep = player.and_then(|i| rt.things.get(i)).is_some_and(|t| t.attach_flags & 8 != 0);
-                if !keep {
-                    state.attach = None;
-                    if let Some(i) = player {
-                        rt.things[i].attach = None;
-                        rt.things[i].attach_flags = 0;
-                    }
+            rt.sector_flags.get(far).is_some_and(|f| f & crate::collide::SECTOR_UNDERWATER != 0)
+        });
+        if wet && state.move_type == 1 && state.attach_flags != 0 && state.attach_flags & 8 == 0 {
+            contact.with(|rt| {
+                let surface = state.attach.and_then(|a| a.surface);
+                let parent = state.attach.and_then(|a| a.thing).map(|hit| hit.thing)
+                    .or_else(|| player.and_then(|i| rt.things[i].attach));
+                rt.detach_support(player, surface, parent, state.flags, Some(&mut state.vel));
+                state.attach = None;
+                state.attach_flags = 0;
+                if let Some(i) = player { rt.unlink_attachment(i); }
+                if let Some(i) = player {
+                    rt.things[i].attach = None;
+                    rt.things[i].floor_attach = None;
+                    rt.things[i].attach_flags = 0;
                 }
-            }
+            });
+            contact.dispatch(state);
+        }
+        let mut damp = false;
+        contact.with(|rt| {
             let was_wet = state.flags & 0x2000000 != 0;
             if wet != was_wet {
                 if wet {
@@ -8549,6 +9233,9 @@ impl Runtime {
                 }
                 if destroy {
                     state.flags |= 2;
+                    if let Some(index) = player {
+                        rt.things[index].destroyed = true;
+                    }
                     if state.flags & 0x400 != 0 && state.flags & 0x100 == 0
                         && let Some(player) = player
                     {
@@ -8556,10 +9243,11 @@ impl Runtime {
                     }
                 } else {
                     if state.flags & 0x20000000 != 0 && state.flags & 0x100 == 0
-                        && let Some(player) = player
+                        && let Some(mover) = player
+                        && let Some(player) = rt.local_player()
                     {
                         let identity = SourceSender {
-                            source_type: THING_SOURCE, source: player as i32, sender_type: 0,
+                            source_type: THING_SOURCE, source: mover as i32, sender_type: 0,
                             sender: i32::from(wet),
                         };
                         let scripts = [rt.thing_class_cog.get(&player).copied(), rt.thing_capture_cog.get(&player).copied()];
@@ -8570,20 +9258,19 @@ impl Runtime {
                     damp = wet;
                 }
             }
-        }
-        Self::player_move_phase(world, state, eye, dispatch);
+        });
+        contact.dispatch(state);
         if damp && state.move_type == 1 {
             state.vel[2] *= 0.25;
         }
-        {
-            let mut rt = world.borrow_mut();
+        contact.with(|rt| {
             if state.flags & 0x80100 == 0
                 && rt.sector_flags.get(state.sector).is_some_and(|f| f & 4 != 0)
             {
                 rt.sith_cog_sector_send_message(state.sector, player, "entered");
             }
-        }
-        Self::player_move_phase(world, state, eye, dispatch);
+        });
+        contact.dispatch(state);
     }
 
     /// Is a body standing in water at `feet`? Two rules, both the engine's: the surface under the
@@ -8658,23 +9345,6 @@ impl Runtime {
         }))
     }
 
-    /// The rider half of a thing-face attach: `sithThing_AttachThingToThingFace` (`0x4ce050:71-74`)
-    /// stores the rider's offset in the parent's frame ([`Runtime::floor_local_anchor`]); this
-    /// returns the face attach and the displacement that restores that offset after the parent
-    /// moved, or `None` once the parent is gone, flagged `0x80002`, or has no face.
-    fn floor_rider_motion(
-        &self, solids: &crate::collide::Solids, previous: crate::collide::Attach,
-        pos: [f32; 3], anchor: Option<[f32; 3]>,
-    ) -> Option<(crate::collide::Attach, [f32; 3])> {
-        let target = previous.thing?;
-        let parent = self.things.get(target.thing).filter(|t| !t.destroyed && t.flags & 0x80002 == 0)?;
-        let attach = solids.thing_face_attach(target)?;
-        let carry = anchor.map_or([0.0; 3], |offset| {
-            (Vec3::from(parent.pos) + Vec3::from(rotate_by_angles(offset, parent.pitch, parent.yaw, parent.roll))
-                - Vec3::from(pos)).to_array()
-        });
-        Some((attach, carry))
-    }
 
     /// `sithSurface_DetachThing` (0x4f0a30): the live scroll, only while the surface is scrolling.
     fn surface_scroll(&self, surface: usize) -> [f32; 3] {
@@ -8755,11 +9425,17 @@ impl Runtime {
             self.detach_support(sender, old.surface, old.thing.map(|t| t.thing), state.flags,
                 (state.move_type == 1).then_some(&mut state.vel));
         }
+        if let Some(index) = sender {
+            self.unlink_attachment(index);
+        }
         let Some(new) = state.attach else { return true };
         if state.move_type == 1 {
             state.vel = (Vec3::from(state.vel) - self.floor_velocity(new)).to_array();
         }
         self.sith_thing_attach_thing_to_surface(previous.and_then(|a| a.surface), new.surface, state.flags, sender);
+        if let (Some(index), Some(target)) = (sender, new.thing) {
+            self.link_attachment(index, target.thing);
+        }
         if let Some(target) = new.thing
             && state.flags & 0x80100 == 0
             && self.things.get(target.thing).is_some_and(|t| t.flags & 0x400 != 0)
@@ -9248,6 +9924,10 @@ impl Runtime {
             floor_attach: None,
             attach_offset: [0.0; 3],
             attach_flags: 0,
+            attachment_parent: None,
+            first_child: None,
+            next_sibling: None,
+            prev_sibling: None,
             spin: None,
             rot_vel: [0.0; 3],
             paused: false,
@@ -9270,6 +9950,7 @@ impl Runtime {
         self.templates.push(template);
         self.types.push(kind);
         let index = self.things.len() - 1;
+        self.register_collision_thing(index);
         if self.encounter_events_enabled {
             // The projectile's own index now exists; the hit or miss that ends it reports this
             // launch time and target.
@@ -10284,6 +10965,10 @@ impl Runtime {
             floor_attach: None,
             attach_offset: [0.0; 3],
             attach_flags: 0,
+            attachment_parent: None,
+            first_child: None,
+            next_sibling: None,
+            prev_sibling: None,
             spin: None,
             rot_vel: [0.0; 3],
             paused: false,
@@ -10301,6 +10986,7 @@ impl Runtime {
         let index = self.things.len() - 1;
         self.templates.push(explode.clone());
         self.types.push(kind);
+        self.register_collision_thing(index);
         self.arm_life(index);
         // `sithExplosion_MakeBlast` (`0x4fb920`) raises kind **1** at strength **3.0** (`0x40400000`)
         // at the blast, with the blast thing as the source — a grenade is heard from further than a
@@ -11059,6 +11745,15 @@ impl Runtime {
             saber: self.saber.get(&self.player_thing()).cloned(),
             adjoin_flags: self.adjoin_flags.clone(),
             sector_light: self.sectors.iter().map(|s| s.light).collect(),
+            attachments: Some(self.things.iter().enumerate().filter_map(|(child, thing)| {
+                if thing.attach_flags == 0 || (thing.attach_flags & 8 == 0 && self.floor_parent_move(child) == 1) {
+                    return None;
+                }
+                Some(AttachmentSave {
+                    child, flags: thing.attach_flags, parent: thing.attach.or(thing.attachment_parent),
+                    floor: thing.floor_attach, offset: thing.attach_offset,
+                })
+            }).collect()),
         }
     }
 
@@ -11089,6 +11784,54 @@ impl Runtime {
                 thing.target = *target;
                 thing.paused = *paused;
                 thing.spin = spin.clone();
+            }
+        }
+        for index in 0..self.things.len() {
+            self.unlink_attachment(index);
+            let thing = &mut self.things[index];
+            thing.attach = None;
+            thing.floor_attach = None;
+            thing.attach_flags = 0;
+        }
+        if let Some(attachments) = &save.attachments {
+            for saved in attachments {
+                if saved.child >= self.things.len() { continue; }
+                if saved.parent.is_some_and(|parent| parent >= self.things.len() || parent == saved.child) { continue; }
+                if saved.floor.and_then(|floor| floor.thing).is_some_and(|hit| Some(hit.thing) != saved.parent || hit.thing >= self.things.len()) { continue; }
+                let mut ancestor = saved.parent;
+                let mut cycle = false;
+                while let Some(index) = ancestor {
+                    if index == saved.child { cycle = true; break; }
+                    ancestor = self.things[index].attachment_parent;
+                }
+                if cycle { continue; }
+                if saved.flags & 4 != 0 {
+                    let Some(parent) = saved.parent else { continue };
+                    self.attach_thing(saved.child as i64, parent as i64);
+                } else if let Some(floor) = saved.floor {
+                    if floor.surface.is_some_and(|surface| surface >= self.surfaces.len())
+                        || floor.thing.is_some_and(|hit| hit.thing >= self.things.len()) { continue; }
+                    let thing = &self.things[saved.child];
+                    let name = self.templates.get(saved.child).map(String::as_str).unwrap_or("");
+                    let mut state = crate::collide::MoveState {
+                        pos: thing.pos, sector: usize::try_from(thing.sector).unwrap_or(0), vel: thing.vel,
+                        remainder: [0.0; 3], phys_flags: thing.phys_flags,
+                        kind: self.types.get(saved.child).copied().unwrap_or(0) as u32,
+                        move_type: self.floor_parent_move(saved.child),
+                        collide: self.template_collide.get(name).copied().unwrap_or(0),
+                        flags: thing.flags, attach: Some(floor), attach_flags: saved.flags,
+                        owner: thing.owner, water_surface: None,
+                    };
+                    self.floor_transition(&mut state, None, Some(saved.child), true);
+                    let thing = &mut self.things[saved.child];
+                    thing.vel = state.vel;
+                    thing.floor_attach = state.attach;
+                } else {
+                    continue;
+                }
+                let thing = &mut self.things[saved.child];
+                thing.attach_flags = saved.flags;
+                thing.attach_offset = saved.offset;
             }
         }
         self.inv = save.inv.clone();
@@ -11366,6 +12109,38 @@ impl Runtime {
         }
     }
 
+    /// Unlink a child from its parent's intrusive attachment list (`0x4ce380`).
+    fn unlink_attachment(&mut self, child: usize) {
+        let Some(thing) = self.things.get(child) else { return };
+        let (parent, prev, next) = (thing.attachment_parent, thing.prev_sibling, thing.next_sibling);
+        if let Some(parent) = parent {
+            if let Some(prev) = prev {
+                self.things[prev].next_sibling = next;
+            } else if let Some(parent) = self.things.get_mut(parent) {
+                parent.first_child = next;
+            }
+            if let Some(next) = next {
+                self.things[next].prev_sibling = prev;
+            }
+        }
+        let thing = &mut self.things[child];
+        thing.attachment_parent = None;
+        thing.prev_sibling = None;
+        thing.next_sibling = None;
+    }
+
+    /// Insert at the head, as both engine thing-attachment functions do.
+    fn link_attachment(&mut self, child: usize, parent: usize) {
+        self.unlink_attachment(child);
+        let head = self.things[parent].first_child;
+        if let Some(head) = head {
+            self.things[head].prev_sibling = Some(child);
+        }
+        self.things[child].attachment_parent = Some(parent);
+        self.things[child].next_sibling = head;
+        self.things[parent].first_child = Some(child);
+    }
+
     /// Run one verb against the world. Argument order follows the shipped scripts; a
     /// verb whose real arity differs simply does nothing useful here, and the
     /// interpreter records it.
@@ -11375,34 +12150,26 @@ impl Runtime {
     /// around it. A negative parent detaches (`sithThing_DetachThing`).
     fn attach_thing(&mut self, child: i64, parent: i64) {
         let (Ok(child), Ok(parent)) = (usize::try_from(child), usize::try_from(parent)) else {
-            if let Ok(child) = usize::try_from(child)
-                && let Some(thing) = self.things.get_mut(child)
-            {
-                thing.attach = None;
-                thing.attach_flags = 0;
+            if let Ok(child) = usize::try_from(child) {
+                self.sith_thing_detach_thing(child);
             }
             return;
         };
         if child == parent || self.things.get(parent).is_none() {
             return;
         }
+        let mut ancestor = Some(parent);
+        while let Some(index) = ancestor {
+            if index == child { return; }
+            ancestor = self.things[index].attachment_parent;
+        }
         if self.things.get(child).is_some_and(|thing| thing.attach == Some(parent) && thing.attach_flags & 4 != 0) {
             return;
         }
-        let (child_pos, parent_pos, parent_yaw) =
-            match (self.things.get(child), self.things.get(parent)) {
-                (Some(c), Some(p)) => (c.pos, p.pos, p.yaw),
-                _ => return,
-            };
-        let d = [
-            child_pos[0] - parent_pos[0],
-            child_pos[1] - parent_pos[1],
-            child_pos[2] - parent_pos[2],
-        ];
-        // Into the parent's frame: the inverse of the rotation `update_attachments` applies.
-        let inverse = Quat::from_rotation_z(-parent_yaw.to_radians());
-        let local = inverse * Vec3::from(d);
-        let offset = [local.x, local.y, local.z];
+        let Some(pos) = self.things.get(child).map(|thing| thing.pos) else { return };
+        let Some(offset) = self.floor_local_anchor(parent, pos) else { return };
+        self.sith_thing_detach_thing(child);
+        self.link_attachment(child, parent);
         if let Some(thing) = self.things.get_mut(child) {
             thing.attach = Some(parent);
             thing.attach_offset = offset;
@@ -11602,7 +12369,7 @@ impl Runtime {
             // `AttachThingToThing(child, parent)` and its `...Ex` spelling with flags: 20 shipped
             // calls, and they are functional — a crate riding a lift, a catwalk hanging off a ship,
             // the sphere `force_absorb.cog` hangs on the player, and the orbiting camera of
-            // `00_cameratricks.cog`. `update_attachments` re-places the child every step.
+            // `00_cameratricks.cog`.
             "attachthingtothing" | "attachthingtothingex" => {
                 let (child, parent) = (idx(0), idx(1));
                 self.attach_thing(child, parent);
@@ -11616,9 +12383,8 @@ impl Runtime {
                 Value::Nil
             }
             "detachthing" => {
-                if let Some(thing) = usize::try_from(idx(0)).ok().and_then(|i| self.things.get_mut(i)) {
-                    thing.attach = None;
-                    thing.attach_flags = 0;
+                if let Ok(thing) = usize::try_from(idx(0)) {
+                    self.sith_thing_detach_thing(thing);
                 }
                 Value::Nil
             }
@@ -11772,9 +12538,8 @@ impl Runtime {
                     return Value::Nil;
                 };
                 let previous = self.things.get(thing).and_then(|t| usize::try_from(t.sector).ok());
+                self.sith_thing_detach_thing(thing);
                 if let Some(t) = self.things.get_mut(thing) {
-                    t.attach = None;
-                    t.attach_flags = 0;
                     t.pos = from.0;
                     t.pitch = from.1;
                     t.yaw = from.2;
@@ -11784,6 +12549,7 @@ impl Runtime {
                     t.path = PathState::default();
                     t.vel = [0.0; 3];
                 }
+                self.sync_script_collider(thing);
                 if let Ok(sector) = usize::try_from(from.4) {
                     if previous != Some(sector) {
                         let messages = self.sector_messages(previous, None, Some(thing));
@@ -13237,6 +14003,7 @@ impl Runtime {
                 if let Some(t) = self.thing_mut(idx(0)) {
                     t.pos = p;
                 }
+                if let Ok(index) = usize::try_from(idx(0)) { self.sync_script_collider(index); }
                 Value::Nil
             }
             "getthingrot" => match self.thing(idx(0)) {
@@ -13250,6 +14017,7 @@ impl Runtime {
                     t.yaw = r[1];
                     t.roll = r[2];
                 }
+                if let Ok(index) = usize::try_from(idx(0)) { self.sync_script_collider(index); }
                 Value::Nil
             }
             // `SetThingLook(thing, dir, blend)` — `sithPhysics_SetThingLook` (`0x4f5a80`): aim the
@@ -13282,6 +14050,7 @@ impl Runtime {
                     t.yaw = (-mixed[0]).atan2(mixed[1]).to_degrees();
                     t.jk_flags |= 0x100;
                 }
+                if let Ok(index) = usize::try_from(idx(0)) { self.sync_script_collider(index); }
                 Value::Nil
             }
             // `SetThingPulse(thing, seconds)`: start the thing's own pulse timer; `0` stops it.
@@ -13299,6 +14068,7 @@ impl Runtime {
                 if let Some(t) = self.thing_mut(idx(0)) {
                     t.sector = idx(1) as i32;
                 }
+                if let Ok(index) = usize::try_from(idx(0)) { self.sync_script_collider(index); }
                 Value::Nil
             }
             "getthingflags" => Value::Num(self.thing(idx(0)).map(|t| t.flags as f64).unwrap_or(0.0)),
@@ -13310,12 +14080,14 @@ impl Runtime {
                 if let Some(t) = self.thing_mut(idx(0)) {
                     t.flags |= idx(1) as u32;
                 }
+                if let Ok(index) = usize::try_from(idx(0)) { self.sync_script_collider(index); }
                 Value::Nil
             }
             "clearthingflags" => {
                 if let Some(t) = self.thing_mut(idx(0)) {
                     t.flags &= !(idx(1) as u32);
                 }
+                if let Ok(index) = usize::try_from(idx(0)) { self.sync_script_collider(index); }
                 Value::Nil
             }
             "getthinghealth" => Value::Num(self.thing(idx(0)).map(|t| t.health as f64).unwrap_or(0.0)),
@@ -14435,7 +15207,7 @@ mod tests {
         let solids = crate::collide::test_room();
         solids.set_things(vec![crate::collide::ThingSolid {
             index: 1, centre: [0.4, 0.0, 0.0], origin: [0.4, 0.0, 0.0], radius: 0.1,
-            z_min: -0.1, z_max: 0.1, sector: 0, half: None, yaw: 0.0, mesh: None,
+            z_min: -0.1, z_max: 0.1, sector: 0, half: None, yaw: 0.0, angles: [0.0; 3], mesh: None,
             thing_flags: 0, collide: 1, owner: None, kind: 10, item: false,
         }]);
         let mut rt = door_runtime();
@@ -14710,6 +15482,10 @@ mod tests {
                 floor_attach: None,
                 attach_offset: [0.0; 3],
                 attach_flags: 0,
+                attachment_parent: None,
+                first_child: None,
+                next_sibling: None,
+                prev_sibling: None,
                 spin: None,
             rot_vel: [0.0; 3],
             paused: false,
@@ -14845,7 +15621,8 @@ mod tests {
         rt.types = vec![0, 10, 0];
         let world = World::new(rt);
         let mut seen = None;
-        Runtime::sith_thing_update(&world, None, 0.1, || {
+        Runtime::sith_thing_update(&world, None, 0.1, |player| {
+            if !player { return; }
             let rt = world.borrow();
             seen = Some((rt.things[0].pos[0], rt.things[2].pos[0]));
         });
@@ -15153,6 +15930,7 @@ mod tests {
             sector: 0,
             half: None,
             yaw: 0.0,
+            angles: [0.0; 3],
             mesh: Some(vec![vec![crate::collide::Face {
                 normal: [0.0, 0.0, 1.0],
                 point: [0.0, 0.0, 1.0123],
@@ -16231,6 +17009,7 @@ mod tests {
         let bytes = rt.snapshot().to_bytes();
         let extension_start = bytes.windows(4).position(|window| window == b"BKT1").unwrap();
         let path_start = extension_start + 13;
+        let attachment_start = bytes.windows(4).rposition(|window| window == b"BKA1").unwrap();
         assert_eq!(&bytes[extension_start..extension_start + 4], b"BKT1");
 
         let current = Snapshot::from_bytes(&bytes).unwrap();
@@ -16253,7 +17032,7 @@ mod tests {
         assert_eq!(item.things[0].type_flags, 0x80);
 
         for end in extension_start + 1..bytes.len() {
-            if end != path_start {
+            if end != path_start && end != attachment_start {
                 assert!(Snapshot::from_bytes(&bytes[..end]).is_none(), "accepted truncated extension at {end}");
             }
         }
@@ -16283,6 +17062,7 @@ mod tests {
         assert!((restored.things[0].yaw - 90.0).abs() < 0.01);
 
         let path_start = bytes.windows(4).position(|window| window == b"BKP1").unwrap();
+        let attachment_start = bytes.windows(4).rposition(|window| window == b"BKA1").unwrap();
         let old = Snapshot::from_bytes(&bytes[..path_start]).unwrap();
         restored.things[0].path.remaining = 99.0;
         restored.things[0].target = None;
@@ -16292,7 +17072,7 @@ mod tests {
         assert_eq!(restored.things[0].target, None);
         assert!(!restored.things[0].paused);
         for end in path_start + 1..bytes.len() {
-            assert!(Snapshot::from_bytes(&bytes[..end]).is_none());
+            if end != attachment_start { assert!(Snapshot::from_bytes(&bytes[..end]).is_none()); }
         }
         let mut malformed = bytes.clone();
         malformed[path_start + 8] = 2;
@@ -18829,7 +19609,7 @@ mod tests {
         rt.template_height.insert("walkplayer".into(), 0.125);
         let pose = |z| solids.set_things(vec![ThingSolid {
             index: parent, centre: [0.0, 0.0, z], origin: [0.0, 0.0, z], radius: 0.75,
-            z_min: z - 0.05, z_max: z, sector: 0, half: None, yaw: 0.0,
+            z_min: z - 0.05, z_max: z, sector: 0, half: None, yaw: 0.0, angles: [0.0; 3],
             mesh: Some(vec![vec![Face {
                 normal: [0.0, 0.0, 1.0], point: [-0.5, -0.5, z],
                 verts: vec![[-0.5, -0.5, z], [0.5, -0.5, z], [0.5, 0.5, z], [-0.5, 0.5, z]],
@@ -18851,19 +19631,166 @@ mod tests {
         let target = body.attach.and_then(|a| a.thing).expect("mesh-floor attachment");
         assert_eq!(target.thing, parent);
         assert!((world.borrow().things[0].health - 55.0).abs() < 0.1, "impact is relative to the path's +3 u/s");
+        let mut seat_height = body.pos.z;
         for (frame, speed, dt, z) in [(1, 3.0, 0.1, 0.3), (0, 0.5, 0.2, 0.2)] {
             {
                 let mut rt = world.borrow_mut();
                 rt.things[parent].move_to_frame(frame, speed);
-                assert!(rt.things[parent].step(dt));
+            }
+            Runtime::sith_thing_update(&world, Some(&solids), dt, |player| {
+                if player { tick(&mut body); }
+            });
+            Runtime::sync_player_body(&world, &mut body);
+            {
+                let rt = world.borrow();
                 assert!((rt.things[parent].pos[2] - z).abs() < 1e-6);
             }
-            pose(z);
             for _ in 0..5 { tick(&mut body); }
             assert_eq!(body.attach.and_then(|a| a.thing), Some(target));
-            assert!((body.pos.z - z - 0.125).abs() < 0.015, "body z {} on lift z {z}", body.pos.z);
+            let height = body.pos.z - z;
+            assert!(height >= seat_height - 0.001 && height <= 0.126, "body z {} on lift z {z}; previous height {seat_height}", body.pos.z);
+            seat_height = height;
         }
         assert!((world.borrow().things[0].health - 55.0).abs() < 0.1, "riding must not repeat landing damage");
+    }
+
+    #[test]
+    fn scripted_thing_position_changes_collision_before_next_search() {
+        use crate::collide::ThingSolid;
+
+        let solids = crate::collide::test_room();
+        let mut rt = player_runtime();
+        rt.things.push(rt.things[0].clone());
+        rt.solids = Some(std::sync::Arc::new(solids.clone()));
+        solids.set_things(vec![ThingSolid {
+            index: 1, centre: [0.0; 3], origin: [0.0; 3], radius: 0.2,
+            z_min: -0.2, z_max: 0.2, sector: 0, half: None, yaw: 0.0, angles: [0.0; 3],
+            mesh: None, thing_flags: 0, collide: 1, owner: None, kind: 7, item: false,
+        }]);
+        let visible = || solids.item_has_los(0, [-0.6, 0.0, 0.0], [0.6, 0.0, 0.0], crate::collide::Gates::default());
+        assert!(!visible());
+        rt.call("SetThingPos", &[Value::Num(1.0), Value::Vec([0.0, 2.0, 0.0])]);
+        assert!(visible(), "the moved thing still blocks its former position");
+    }
+
+    #[test]
+    fn scripted_spawn_collides_in_the_same_thing_update() {
+        use crate::collide::ThingSolid;
+
+        let solids = crate::collide::test_room();
+        let mut rt = player_runtime();
+        rt.collision_templates.insert("blocker".into(), ThingSolid {
+            index: 0, centre: [0.0; 3], origin: [0.0; 3], radius: 0.2,
+            z_min: -0.2, z_max: 0.2, sector: 0, half: None, yaw: 0.0, angles: [0.0; 3],
+            mesh: None, thing_flags: 0, collide: 1, owner: None, kind: 7, item: false,
+        });
+        let world = World::new(rt);
+        let visible = || solids.item_has_los(0, [-0.6, 0.0, 0.0], [0.6, 0.0, 0.0], crate::collide::Gates::default());
+        assert!(visible());
+        let mut ran = false;
+        Runtime::sith_thing_update(&world, Some(&solids), 0.02, |player| {
+            if player {
+                ran = true;
+                world.borrow_mut().call("CreateThingAtPos", &[
+                    Value::Str("blocker".into()), Value::Num(0.0),
+                    Value::Vec([0.0; 3]), Value::Vec([0.0; 3]),
+                ]);
+                assert!(!visible(), "spawned solid did not block the next search");
+            }
+        });
+        assert!(ran);
+    }
+
+    #[test]
+    fn later_player_finds_moved_platform_during_thing_update() {
+        use crate::collide::{Face, ThingSolid};
+
+        let solids = crate::collide::test_room();
+        let mut rt = player_runtime();
+        let mut lift = rt.things[0].clone();
+        lift.pos = [0.0; 3];
+        lift.vel = [0.0; 3];
+        lift.flags = 0x40;
+        lift.frames = vec![[0.0; 6], [0.0, 0.0, 0.5, 0.0, 0.0, 0.0]];
+        lift.move_to_frame(1, 3.0);
+        rt.things.insert(0, lift);
+        rt.templates.insert(0, "testplatform".into());
+        rt.types.insert(0, 7);
+        rt.template_move.insert("testplatform".into(), "path".into());
+        rt.template_height.insert("walkplayer".into(), 0.125);
+        solids.set_things(vec![ThingSolid {
+            index: 0, centre: [0.0; 3], origin: [0.0; 3], radius: 0.75,
+            z_min: -0.05, z_max: 0.0, sector: 0, half: None, yaw: 0.0, angles: [0.0; 3],
+            mesh: Some(vec![vec![Face {
+                normal: [0.0, 0.0, 1.0], point: [-0.5, -0.5, 0.0],
+                verts: vec![[-0.5, -0.5, 0.0], [0.5, -0.5, 0.0], [0.5, 0.5, 0.0], [-0.5, 0.5, 0.0]],
+                surface: usize::MAX,
+            }]].into()),
+            thing_flags: 0x40, collide: 3, owner: None, kind: 7, item: false,
+        }]);
+        let rules = crate::Rules::from_level(&Level::default());
+        let mut body = walk_body(Vec3::new(0.0, 0.0, 0.3 + rules.radius + 0.005));
+        body.grounded = false;
+        body.gravity = 0.0;
+        body.vy = -0.5;
+        let world = World::new(rt);
+        Runtime::sith_thing_update(&world, Some(&solids), 0.1, |player| {
+            if player {
+                Runtime::step_player(&world, &mut body, &solids, PlayerInput::default(), &rules, 0.02, || {});
+            }
+        });
+        assert!((world.borrow().things[0].pos[2] - 0.3).abs() < 1e-6);
+        assert_eq!(body.attach.and_then(|a| a.thing).map(|hit| hit.thing), Some(0));
+    }
+
+    #[test]
+    fn later_player_finds_rotated_platform_during_thing_update() {
+        use crate::collide::{Face, ThingSolid};
+
+        let solids = crate::collide::test_room();
+        let mut rt = player_runtime();
+        let mut platform = rt.things[0].clone();
+        platform.pos = [0.0; 3];
+        platform.vel = [0.0; 3];
+        platform.flags = 0x40;
+        platform.frames = vec![[0.0; 6], [0.0, 0.0, 0.0, 0.0, 90.0, 0.0]];
+        platform.move_to_frame(1, 1.0);
+        rt.things.insert(0, platform);
+        rt.templates.insert(0, "testplatform".into());
+        rt.types.insert(0, 7);
+        rt.template_move.insert("testplatform".into(), "path".into());
+        rt.template_height.insert("walkplayer".into(), 0.125);
+        solids.set_things(vec![ThingSolid {
+            index: 0, centre: [0.0; 3], origin: [0.0; 3], radius: 0.75,
+            z_min: -0.05, z_max: 0.0, sector: 0, half: None, yaw: 0.0, angles: [0.0; 3],
+            mesh: Some(vec![vec![Face {
+                normal: [0.0, 0.0, 1.0], point: [-0.5, -0.1, 0.0],
+                verts: vec![[-0.5, -0.1, 0.0], [0.5, -0.1, 0.0], [0.5, 0.1, 0.0], [-0.5, 0.1, 0.0]],
+                surface: usize::MAX,
+            }]].into()),
+            thing_flags: 0x40, collide: 3, owner: None, kind: 7, item: false,
+        }]);
+        let rules = crate::Rules::from_level(&Level::default());
+        let mut body = walk_body(Vec3::new(0.0, 0.4, rules.radius + 0.005));
+        body.grounded = false;
+        body.gravity = 0.0;
+        body.vy = -0.5;
+        let world = World::new(rt);
+        let mut player_stepped = false;
+        Runtime::sith_thing_update(&world, Some(&solids), 1.0, |player| {
+            if player {
+                player_stepped = true;
+                Runtime::step_player(&world, &mut body, &solids, PlayerInput::default(), &rules, 0.02, || {});
+                let floor = body.attach.expect("rotated platform floor");
+                assert_eq!(floor.thing.map(|hit| hit.thing), Some(0));
+                // rdMatrix_Build34's 90-degree yaw maps the first vertex to (0.1, -0.5, 0).
+                assert!((floor.point[0] - 0.1).abs() < 1e-5);
+                assert!((floor.point[1] + 0.5).abs() < 1e-5);
+                assert!(floor.point[2].abs() < 1e-5);
+            }
+        });
+        assert!(player_stepped);
+        assert!((world.borrow().things[0].yaw - 90.0).abs() < 1e-5);
     }
 
     #[test]
@@ -19050,7 +19977,7 @@ mod tests {
         rt.mass.insert(1, 150.0);
         solids.set_things(vec![crate::collide::ThingSolid {
             index: 1, centre: [x, 0.0, 0.0], origin: [x, 0.0, 0.0], radius: 0.1,
-            z_min: -0.1, z_max: 0.1, sector: 0, half: None, yaw: 0.0, mesh: None,
+            z_min: -0.1, z_max: 0.1, sector: 0, half: None, yaw: 0.0, angles: [0.0; 3], mesh: None,
             thing_flags: 0x80, collide: 1, kind: 2, owner: None, item: false,
         }]);
         let rt = World::new(rt);
@@ -19089,7 +20016,7 @@ mod tests {
             rt.gravity = 0.0;
             solids.set_things(rt.things.iter().enumerate().map(|(index, t)| crate::collide::ThingSolid {
                 index, centre: t.pos, origin: t.pos, radius: 0.1, z_min: -0.1, z_max: 0.1, sector: 0,
-                half: None, yaw: 0.0, mesh: None, thing_flags: 0, collide: 1, kind: 4, owner: None, item: false,
+                half: None, yaw: t.yaw, angles: [t.pitch, t.yaw, t.roll], mesh: None, thing_flags: 0, collide: 1, kind: 4, owner: None, item: false,
             }).collect());
 
             rt.step(Some(&solids), 0.02);
@@ -20395,7 +21322,7 @@ mod tests {
         rt.things[0].pos = [-0.4, 0.0, -0.93];
         solids.set_things(vec![crate::collide::ThingSolid {
             index: 0, centre: [-0.4, 0.0, -0.93], origin: [-0.4, 0.0, -0.93], radius: 0.065,
-            z_min: -1.0, z_max: -0.8, sector: 0, half: None, yaw: 0.0, mesh: None,
+            z_min: -1.0, z_max: -0.8, sector: 0, half: None, yaw: 0.0, angles: [0.0; 3], mesh: None,
             thing_flags: 0, collide: 1, kind: 10, owner: None, item: false,
         }]);
         rt.call("AISetMovePos", &[Value::Num(1.0), Value::Vec([1.5, 0.0, -0.93])]);
@@ -20695,17 +21622,17 @@ mod tests {
         rt.life_left.insert(1, 0.15);
         let world = World::new(rt);
         let mut player_steps = 0;
-        Runtime::sith_thing_update(&world, None, 0.1, || player_steps += 1);
+        Runtime::sith_thing_update(&world, None, 0.1, |player| if player { player_steps += 1 });
         assert_eq!(player_steps, 0);
         assert!(world.borrow().air_ms.get(&1).is_none());
         assert!((world.borrow().life_left[&1] - 0.05).abs() < 1e-5);
         world.borrow_mut().things[0].flags &= !0x80000;
         world.borrow_mut().things[1].flags &= !0x80000;
-        Runtime::sith_thing_update(&world, None, 0.01, || player_steps += 1);
+        Runtime::sith_thing_update(&world, None, 0.01, |player| if player { player_steps += 1 });
         assert_eq!(player_steps, 1);
         assert_eq!(world.borrow().air_ms.get(&1), Some(&10));
         world.borrow_mut().things[1].flags |= 0x80000;
-        Runtime::sith_thing_update(&world, None, 0.1, || player_steps += 1);
+        Runtime::sith_thing_update(&world, None, 0.1, |player| if player { player_steps += 1 });
         assert_eq!(world.borrow().types[1], 9, "disabled actor did not expire");
     }
 

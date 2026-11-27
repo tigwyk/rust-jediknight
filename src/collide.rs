@@ -59,6 +59,8 @@ pub struct ThingSolid {
     pub half: Option<[f32; 2]>,
     /// Degrees, the engine's `rdMatrix_Build34` yaw.
     pub yaw: f32,
+    /// Full orientation of the world-space collision mesh, in degrees.
+    pub angles: [f32; 3],
     /// `collide=3`: the model's collision faces in world space (outward normals), placed under the
     /// thing's full pitch/yaw/roll. `sithIntersect_CheckSphereThingIntersection` (`0x5080d0`) sweeps
     /// these instead of a sphere, so a door leaf laid flat (`18Ascend` things 323/324) is a floor.
@@ -184,6 +186,74 @@ impl LevelGeometry {
             .things
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = things;
+    }
+
+    pub fn insert_thing_in(things: &std::sync::RwLock<Vec<ThingSolid>>, thing: ThingSolid) {
+        let mut things = things.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(existing) = things.iter_mut().find(|existing| existing.index == thing.index) {
+            *existing = thing;
+        } else {
+            things.push(thing);
+        }
+    }
+
+    pub fn remove_thing_in(things: &std::sync::RwLock<Vec<ThingSolid>>, index: usize) {
+        let mut things = things.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(position) = things.iter().position(|thing| thing.index == index) {
+            things.remove(position);
+        }
+    }
+
+    /// Synchronize a placed thing's collision pose with its live runtime pose.
+    pub fn sync_thing_pose(&self, index: usize, pos: [f32; 3], sector: usize, angles: [f32; 3]) {
+        Self::sync_thing_pose_in(&self.things, index, pos, sector, angles);
+    }
+
+    pub fn sync_thing_pose_in(things: &std::sync::RwLock<Vec<ThingSolid>>, index: usize, pos: [f32; 3], sector: usize, angles: [f32; 3]) {
+        let mut things = things.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(thing) = things.iter_mut().find(|thing| thing.index == index) else { return };
+        thing.sector = sector;
+        if thing.origin == pos && thing.angles == angles { return; }
+        let old_pos = thing.origin;
+        let old_angles = thing.angles;
+        let rotation = (old_angles != angles).then(|| {
+            let axes = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+            (
+                axes.map(|axis| crate::runtime::rotate_by_angles(axis, old_angles[0], old_angles[1], old_angles[2])),
+                axes.map(|axis| crate::runtime::rotate_by_angles(axis, angles[0], angles[1], angles[2])),
+            )
+        });
+        let rotate = |v: [f32; 3]| {
+            let Some((old, new)) = rotation else { return v };
+            let local = old.map(|axis| axis[0] * v[0] + axis[1] * v[1] + axis[2] * v[2]);
+            std::array::from_fn(|i| new[0][i] * local[0] + new[1][i] * local[1] + new[2][i] * local[2])
+        };
+        let place = |v: [f32; 3]| {
+            let v = rotate([v[0] - old_pos[0], v[1] - old_pos[1], v[2] - old_pos[2]]);
+            [v[0] + pos[0], v[1] + pos[1], v[2] + pos[2]]
+        };
+        if let Some(mesh) = &mut thing.mesh {
+            let mut bounds = (f32::MAX, f32::MIN);
+            for face in std::sync::Arc::make_mut(mesh).iter_mut().flatten() {
+                face.normal = rotate(face.normal);
+                face.point = place(face.point);
+                for vertex in &mut face.verts {
+                    *vertex = place(*vertex);
+                    bounds.0 = bounds.0.min(vertex[2]);
+                    bounds.1 = bounds.1.max(vertex[2]);
+                }
+            }
+            (thing.z_min, thing.z_max) = bounds;
+        } else {
+            thing.z_min += pos[2] - old_pos[2];
+            thing.z_max += pos[2] - old_pos[2];
+        }
+        let (sin, cos) = (angles[1] - old_angles[1]).to_radians().sin_cos();
+        let (x, y) = (thing.centre[0] - old_pos[0], thing.centre[1] - old_pos[1]);
+        thing.centre = [pos[0] + x * cos - y * sin, pos[1] + x * sin + y * cos, pos[2]];
+        thing.origin = pos;
+        thing.yaw = angles[1];
+        thing.angles = angles;
     }
 
     pub fn things(&self) -> std::sync::RwLockReadGuard<'_, Vec<ThingSolid>> {
@@ -882,16 +952,20 @@ pub struct CollisionSearch {
     count: usize,
     sectors: [usize; 64],
     sector_count: usize,
-    excluded_thing: Option<usize>,
+    excluded_things: [Option<usize>; 2],
 }
 
 impl CollisionSearch {
     pub(crate) fn new() -> Self {
-        Self { records: [None; 128], count: 0, sectors: [0; 64], sector_count: 0, excluded_thing: None }
+        Self { records: [None; 128], count: 0, sectors: [0; 64], sector_count: 0, excluded_things: [None; 2] }
     }
 
     pub(crate) fn exclude_thing(&mut self, index: usize) {
-        self.excluded_thing = Some(index);
+        if !self.excluded_things.contains(&Some(index))
+            && let Some(slot) = self.excluded_things.iter_mut().find(|slot| slot.is_none())
+        {
+            *slot = Some(index);
+        }
     }
 
     fn push(&mut self, record: CollisionRecord) {
@@ -1273,7 +1347,7 @@ impl LevelGeometry {
         search.sector_count = 0;
         search.add_sector(sector);
         let things = self.things();
-        let excluded = search.excluded_thing;
+        let excluded = search.excluded_things;
         if flags & 1 == 0 {
             self.thing_contacts(&things, mover, start, dir, dist, radius, sector, flags, excluded, |_, hit| search.push(CollisionRecord::Solid(hit)));
         }
@@ -1764,7 +1838,7 @@ impl LevelGeometry {
         radius: f32,
         sector: usize,
         flags: u32,
-        excluded: Option<usize>,
+        excluded: [Option<usize>; 2],
         mut each: impl FnMut(&ThingSolid, Sweep),
     ) {
         let mut each = move |solid: &ThingSolid, mut hit: Sweep| {
@@ -1774,7 +1848,7 @@ impl LevelGeometry {
             each(solid, hit);
         };
         for thing in things.iter() {
-            if thing.sector != sector || excluded == Some(thing.index) {
+            if thing.sector != sector || excluded.contains(&Some(thing.index)) {
                 continue;
             }
             if flags & 8 != 0 && thing.thing_flags & 0x80 == 0 {
@@ -1842,6 +1916,7 @@ impl LevelGeometry {
             },
             |state| self.inside_sector_with_gates(state.sector, state.pos, 0.0, gates),
             |_| {},
+            |_| {},
             |_, _| {},
             |state, hit, crease| self.probe_contact(state, hit, crease),
         );
@@ -1886,15 +1961,15 @@ impl LevelGeometry {
     ///   `floor_tail` unless the caller passed `0x40`; an unattached (or attach-flag-8) body must
     ///   also carry physflag `0x40` and a vertical speed in `[-2.0, 0.2]` (`0x523018`/`0x52301c`).
     ///
-    /// The rider recursion of `:61-88`/`:266-278` (a thing's children move with it, `0x34 & 2`
-    /// damage) has no ported equivalent: no ported thing carries children. Callbacks run
-    /// synchronously; each search and final containment read the current world.
+    /// The caller handles rider recursion, crush damage, and placement for `:61-88`/`:266-278`.
+    /// Callbacks run synchronously; each search and final containment read the current world.
     #[allow(clippy::too_many_arguments)]
     pub fn move_thing_with(
         &self, state: &mut MoveState, delta: [f32; 3], radius: f32, flags: u32,
         mut search_world: impl FnMut(&MoveState, [f32; 3], f32, f32, u32, &mut CollisionSearch),
         mut crossing: impl FnMut(&mut MoveState, Option<usize>, usize),
         mut contains: impl FnMut(&MoveState) -> bool,
+        mut place_riders: impl FnMut(&mut MoveState),
         mut floor_tail: impl FnMut(&mut MoveState),
         mut touch_item: impl FnMut(&mut MoveState, usize),
         mut solid_contact: impl FnMut(&mut MoveState, Sweep, &mut Option<[f32; 3]>) -> bool,
@@ -1996,6 +2071,7 @@ impl LevelGeometry {
             state.pos = saved.0;
             crossing(state, None, saved.1);
         }
+        place_riders(state);
         // `0x4e7950:279-296` — the FindFloor tail.
         if state.move_type == 1 {
             if total == 0.0 { return total; }
@@ -2304,6 +2380,7 @@ impl LevelGeometry {
                 state.sector = far;
             },
             |state| self.inside_sector_with_gates(state.sector, state.pos, 0.0, gates),
+            |_| {},
             |state| { landed = self.finish_body(state, radius, height, gates); },
             |_, _| {},
             |state, hit, crease| self.probe_contact(state, hit, crease),
@@ -3399,6 +3476,7 @@ mod tests {
                 |_, _, _| {},
                 |_| true,
                 |_| {},
+                |_| {},
                 |state, item| {
                     assert!(contact.replace((item, state.pos)).is_none());
                 },
@@ -3486,6 +3564,7 @@ mod tests {
             sector: 0,
             half: None,
             yaw: 0.0,
+            angles: [0.0; 3],
             mesh: None,
             thing_flags,
             collide: 1,
@@ -3615,6 +3694,7 @@ mod tests {
             sector: 0,
             half: None,
             yaw: 0.0,
+            angles: [0.0; 3],
             mesh: None,
             thing_flags: 0,
             collide: 1,
@@ -3637,6 +3717,7 @@ mod tests {
             sector: 0,
             half: None,
             yaw: 0.0,
+            angles: [0.0; 3],
             mesh: None,
             thing_flags: 0,
             collide: 1,
@@ -3742,6 +3823,7 @@ mod tests {
             sector: 0,
             half: Some([0.1, 0.1]),
             yaw: 0.0,
+            angles: [0.0; 3],
             mesh: None,
             thing_flags: 0,
             collide: 1,
@@ -4608,6 +4690,7 @@ mod tests {
             sector: 2,
             half: None,
             yaw: 0.0,
+            angles: [0.0; 3],
             mesh: None,
             thing_flags: 0,
             collide: 1,
@@ -4646,6 +4729,7 @@ mod tests {
             sector: 0,
             half: None,
             yaw: 0.0,
+            angles: [0.0; 3],
             mesh: None,
             thing_flags: 0,
             collide: 1,
@@ -4699,6 +4783,7 @@ mod tests {
             sector: 0,
             half: Some([0.2, 0.0125]),
             yaw: 0.0,
+            angles: [0.0; 3],
             mesh: Some(vec![faces].into()),
             thing_flags: 0,
             collide: 3,
@@ -4841,6 +4926,7 @@ mod tests {
             sector: 0,
             half: None,
             yaw: 0.0,
+            angles: [0.0; 3],
             mesh: None,
             thing_flags: 0,
             collide: 1,
@@ -4913,6 +4999,7 @@ mod tests {
             sector: 0,
             half: Some([1.0; 2]),
             yaw: 0.0,
+            angles: [0.0; 3],
             mesh: Some(vec![vec![Face {
                 normal: [-1.0, 0.0, 0.0],
                 point: [0.0; 3],
@@ -4982,6 +5069,7 @@ mod tests {
         ThingSolid {
             index: 77, centre: [0.0; 3], origin: [0.0; 3], radius: 4.0,
             z_min: -4.0, z_max: 4.0, sector: 0, half: None, yaw: 0.0,
+            angles: [0.0; 3],
             mesh: Some(meshes.into()), thing_flags: 0x40, collide: 3, owner: None, kind: 7, item: false,
         }
     }
@@ -5236,6 +5324,7 @@ mod tests {
         solids.set_things(vec![ThingSolid {
             index: 77, centre: [0.0; 3], origin: [0.0; 3], radius: 4.0,
             z_min: -4.0, z_max: 4.0, sector: 0, half: None, yaw: 0.0,
+            angles: [0.0; 3],
             mesh: Some(vec![vec![Face {
                 normal: [0.0, 0.0, 1.0],
                 point: [0.0, 0.0, -0.1],
@@ -5336,6 +5425,7 @@ mod tests {
             },
             |state| solids.inside_sector_with_gates(state.sector, state.pos, 0.0, Gates::default()),
             |_| {},
+            |_| {},
             |_, _| {},
             |state, hit, crease| solids.probe_contact(state, hit, crease),
         );
@@ -5371,6 +5461,7 @@ mod tests {
             |state, surface, far| { if surface.is_some() { state.sector = far; } },
             |_| true,
             |_| {},
+            |_| {},
             |_, _| {},
             |state, hit, crease| solids.probe_contact(state, hit, crease),
         );
@@ -5400,6 +5491,7 @@ mod tests {
             |state, _, far| { state.sector = far; },
             |_| false,
             |_| {},
+            |_| {},
             |_, _| {},
             |state, hit, crease| solids.probe_contact(state, hit, crease),
         );
@@ -5426,6 +5518,7 @@ mod tests {
                 |_, _, _, _, _, _| {},
                 |_, _, _| {},
                 |_| true,
+                |_| {},
                 |_| { ran = true; },
                 |_, _| {},
                 |state, hit, crease| solids.probe_contact(state, hit, crease),

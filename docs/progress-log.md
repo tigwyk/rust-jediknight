@@ -8273,3 +8273,31 @@ remain in `ThingMotion::turned`, and the door diagnostic waits for either kind o
 verbs (`0x504c20`, `0x504c80`) modify individual bits. Attaching to a thing sets kind 4, and
 `AttachThingToThingEx` (`0x503600`) adds its flags. Collision rider recursion remains tracked in #149.
 
+
+## #148: synchronous non-player movement callbacks
+
+Non-player physics and path sweeps dispatch collision and sector messages while movement is in
+progress, with the world guard released. The mover's state is published before Cog execution and
+read back afterward. Sector crossings follow `sithCollision_MoveThing` (`0x4e7950`) and
+`sithThing_SetSector` (`0x4cd1e0`), including water transitions. Integration tests cover contact
+and crossing script changes and the player/other-thing update order.
+
+## #149: rider movement and live collision shapes
+
+`sithCollision_MoveThing` (`0x4e7950`) moves non-rigid riders before their parent and places rigid
+riders after containment. Attachment links and save restoration preserve rider order. Collision shapes
+now follow moving and rotating things during updates; scripted pose changes and newly created template
+shapes become visible to subsequent searches in the same update.
+
+The release build and port-only collision check pass. All nine default walk-preflight legs pass.
+Isolated comparisons against the committed traces meet the trace-gate thresholds on eight legs;
+`walk6_spawn` drifts on three of six sector samples, although travel is 1.06 versus 1.08 units.
+The all-level walk reports 32 of 34 starts contained; the same two `16aescapeship` and
+`16bescapeship` results were already documented in `docs/engineering.md`. No pre-#149 build was
+run for comparison with the trace drift.
+
+A same-session `walk6_spawn` comparison used the identical trace harness and pose with the committed
+fixture. Pre-#149 `528e1598ef` produced 1.07 units and five sector mismatches; `22384fbeca` produced
+1.06 units and three mismatches. The baseline ends in sector 290 and the branch ends in sector 315.
+The release binaries had distinct SHA-256 hashes. The sector-sample drift predates #149; the branch
+reduces it on this leg.
