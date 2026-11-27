@@ -8295,3 +8295,9 @@ Isolated comparisons against the committed traces meet the trace-gate thresholds
 The all-level walk reports 32 of 34 starts contained; the same two `16aescapeship` and
 `16bescapeship` results were already documented in `docs/engineering.md`. No pre-#149 build was
 run for comparison with the trace drift.
+
+A same-session `walk6_spawn` comparison used the identical trace harness and pose with the committed
+fixture. Pre-#149 `528e1598ef` produced 1.07 units and five sector mismatches; `22384fbeca` produced
+1.06 units and three mismatches. The baseline ends in sector 290 and the branch ends in sector 315.
+The release binaries had distinct SHA-256 hashes. The sector-sample drift predates #149; the branch
+reduces it on this leg.
