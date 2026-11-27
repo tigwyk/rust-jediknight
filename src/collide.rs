@@ -188,9 +188,29 @@ impl LevelGeometry {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = things;
     }
 
+    pub fn insert_thing_in(things: &std::sync::RwLock<Vec<ThingSolid>>, thing: ThingSolid) {
+        let mut things = things.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(existing) = things.iter_mut().find(|existing| existing.index == thing.index) {
+            *existing = thing;
+        } else {
+            things.push(thing);
+        }
+    }
+
+    pub fn remove_thing_in(things: &std::sync::RwLock<Vec<ThingSolid>>, index: usize) {
+        let mut things = things.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(position) = things.iter().position(|thing| thing.index == index) {
+            things.remove(position);
+        }
+    }
+
     /// Synchronize a placed thing's collision pose with its live runtime pose.
     pub fn sync_thing_pose(&self, index: usize, pos: [f32; 3], sector: usize, angles: [f32; 3]) {
-        let mut things = self.things.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::sync_thing_pose_in(&self.things, index, pos, sector, angles);
+    }
+
+    pub fn sync_thing_pose_in(things: &std::sync::RwLock<Vec<ThingSolid>>, index: usize, pos: [f32; 3], sector: usize, angles: [f32; 3]) {
+        let mut things = things.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(thing) = things.iter_mut().find(|thing| thing.index == index) else { return };
         thing.sector = sector;
         if thing.origin == pos && thing.angles == angles { return; }

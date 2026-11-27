@@ -8281,3 +8281,10 @@ progress, with the world guard released. The mover's state is published before C
 read back afterward. Sector crossings follow `sithCollision_MoveThing` (`0x4e7950`) and
 `sithThing_SetSector` (`0x4cd1e0`), including water transitions. Integration tests cover contact
 and crossing script changes and the player/other-thing update order.
+
+## #149: rider movement and live collision shapes
+
+`sithCollision_MoveThing` (`0x4e7950`) moves non-rigid riders before their parent and places rigid
+riders after containment. Attachment links and save restoration preserve rider order. Collision shapes
+now follow moving and rotating things during updates; scripted pose changes and newly created template
+shapes become visible to subsequent searches in the same update.

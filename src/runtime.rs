@@ -1920,6 +1920,9 @@ pub struct Runtime {
     /// and sends `blocked` — `SITH_MESSAGE_BLOCKED`, the eighth most common label on level 1 (x8) —
     /// which is what a door script uses to know a body is in the way.
     pub solids: Option<std::sync::Arc<crate::collide::Solids>>,
+    /// Model-space collision shapes for templates created after the frame begins.
+    pub collision_templates: std::collections::HashMap<String, crate::collide::ThingSolid>,
+    active_collision: Option<std::sync::Arc<std::sync::RwLock<Vec<crate::collide::ThingSolid>>>>,
     /// Whether `sithThing_Initialize`'s creation attach (`FindFloor(thing, 1)`) has run for the
     /// placed physics bodies — once, on the first step that has a collider.
     pub seated_load: bool,
@@ -3018,6 +3021,8 @@ impl Runtime {
             pending_messages: Vec::new(),
             last_activate: f32::NEG_INFINITY,
             solids: None,
+            collision_templates: Default::default(),
+            active_collision: None,
             seated_load: false,
             template_min_damage: level
                 .templates
@@ -3410,6 +3415,47 @@ impl Runtime {
         self.scroll_epoch += 1;
     }
 
+    fn with_collision_things(&self, mut f: impl FnMut(&std::sync::RwLock<Vec<crate::collide::ThingSolid>>)) {
+        let stored = self.solids.as_ref().map(|solids| &solids.things);
+        if let Some(things) = stored { f(things); }
+        if let Some(things) = &self.active_collision {
+            if stored.is_none_or(|stored| !std::sync::Arc::ptr_eq(stored, things)) {
+                f(things);
+            }
+        }
+    }
+
+    fn sync_script_collider(&self, index: usize) {
+        let Some(thing) = self.things.get(index) else { return };
+        self.with_collision_things(|things| {
+            let sector = usize::try_from(thing.sector).unwrap_or(usize::MAX);
+            crate::collide::Solids::sync_thing_pose_in(
+                things, index, thing.pos, sector, [thing.pitch, thing.yaw, thing.roll],
+            );
+            let mut solids = things.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(solid) = solids.iter_mut().find(|solid| solid.index == index) {
+                solid.thing_flags = thing.flags;
+            }
+        });
+    }
+
+    fn register_collision_thing(&self, index: usize) {
+        let Some(thing) = self.things.get(index) else { return };
+        let Some(template) = self.templates.get(index) else { return };
+        let Some(prefab) = self.collision_templates.get(template) else { return };
+        let Ok(sector) = usize::try_from(thing.sector) else { return };
+        self.with_collision_things(|things| {
+            let mut solid = prefab.clone();
+            solid.index = index;
+            solid.thing_flags = thing.flags;
+            solid.owner = thing.owner;
+            crate::collide::Solids::insert_thing_in(things, solid);
+            crate::collide::Solids::sync_thing_pose_in(
+                things, index, thing.pos, sector, [thing.pitch, thing.yaw, thing.roll],
+            );
+        });
+    }
+
     /// Create a thing from a template at a pose: the one constructor `CreateThing` (marker-relative)
     /// and `CreateThingAtPos` (absolute) share, so the two cannot drift apart.
     fn spawn_at(&mut self, template: String, pos: [f32; 3], sector: i32, angles: [f32; 3]) -> usize {
@@ -3484,6 +3530,7 @@ impl Runtime {
             self.mass.insert(index, mass);
         }
         self.arm_life(index);
+        self.register_collision_thing(index);
         index
     }
 
@@ -3638,6 +3685,7 @@ impl Runtime {
         geometry: Option<&crate::collide::Solids>,
         dt: f32,
     ) -> ThingMotion {
+        let active = std::mem::replace(&mut self.active_collision, geometry.map(|solids| solids.things.clone()));
         self.sith_update_head(dt);
         self.sith_surface_tick(dt);
         let mut pass = self.thing_update_begin(geometry, dt);
@@ -3650,7 +3698,9 @@ impl Runtime {
                 }
             }
         }
-        self.thing_update_end(pass)
+        let result = self.thing_update_end(pass);
+        self.active_collision = active;
+        result
     }
 
     /// `sithUpdate`'s (`0x4c4c00:24-31`) slots before the AI: the time advance, the sound mixer
@@ -3728,6 +3778,10 @@ impl Runtime {
         dt: f32,
         mut callback: impl FnMut(bool),
     ) -> ThingMotion {
+        let active = {
+            let mut rt = world.borrow_mut();
+            std::mem::replace(&mut rt.active_collision, geometry.map(|solids| solids.things.clone()))
+        };
         let (mut pass, count) = {
             let mut rt = world.borrow_mut();
             let pass = rt.thing_update_begin(geometry, dt);
@@ -3750,7 +3804,10 @@ impl Runtime {
                 }
             }
         }
-        world.borrow_mut().thing_update_end(pass)
+        let mut rt = world.borrow_mut();
+        let result = rt.thing_update_end(pass);
+        rt.active_collision = active;
+        result
     }
 
     /// The per-frame tables `sithThing_Update`'s loop reads, and the one-time load attach.
@@ -4009,6 +4066,7 @@ impl Runtime {
         let old = t.flags;
         t.flags |= 2;
         t.destroyed = true;
+        self.sync_script_collider(i);
         if old & 0x400 != 0 && old & 0x100 == 0 {
             self.sith_cog_thing_send_message(i, None, "removed");
         }
@@ -4112,6 +4170,7 @@ impl Runtime {
     /// and the port's creation appends a new slot instead of popping the free stack
     /// (`sithThing_CreateThingAtPos`, `0x4cd9e0`); upgrade when thing indices must match retail's.
     fn sith_thing_free_destroyed(&mut self, i: usize) {
+        self.with_collision_things(|things| crate::collide::Solids::remove_thing_in(things, i));
         self.sith_thing_detach_thing(i);
         let (sector, flags) = (self.things[i].sector, self.things[i].flags);
         if let Ok(s) = usize::try_from(sector) {
@@ -8152,6 +8211,10 @@ impl Runtime {
         dt: f32,
         dispatch: impl FnMut(),
     ) -> bool {
+        let active = {
+            let mut rt = world.borrow_mut();
+            rt.active_collision.replace(solids.things.clone())
+        };
         world.borrow_mut().set_player_collision(body.eye, rules.radius);
         // A script can move the body: `force_jump.cog`'s `SetThingVel(player, ...)` lands on the
         // player thing, and the walker consumes it as a one-shot impulse.
@@ -8459,6 +8522,7 @@ impl Runtime {
                 solids.sync_thing_pose(index, thing.pos, body.sector, [thing.pitch, thing.yaw, thing.roll]);
             }
         }
+        world.borrow_mut().active_collision = active;
         crossed
     }
 
@@ -9886,6 +9950,7 @@ impl Runtime {
         self.templates.push(template);
         self.types.push(kind);
         let index = self.things.len() - 1;
+        self.register_collision_thing(index);
         if self.encounter_events_enabled {
             // The projectile's own index now exists; the hit or miss that ends it reports this
             // launch time and target.
@@ -10921,6 +10986,7 @@ impl Runtime {
         let index = self.things.len() - 1;
         self.templates.push(explode.clone());
         self.types.push(kind);
+        self.register_collision_thing(index);
         self.arm_life(index);
         // `sithExplosion_MakeBlast` (`0x4fb920`) raises kind **1** at strength **3.0** (`0x40400000`)
         // at the blast, with the blast thing as the source — a grenade is heard from further than a
@@ -12483,6 +12549,7 @@ impl Runtime {
                     t.path = PathState::default();
                     t.vel = [0.0; 3];
                 }
+                self.sync_script_collider(thing);
                 if let Ok(sector) = usize::try_from(from.4) {
                     if previous != Some(sector) {
                         let messages = self.sector_messages(previous, None, Some(thing));
@@ -13936,6 +14003,7 @@ impl Runtime {
                 if let Some(t) = self.thing_mut(idx(0)) {
                     t.pos = p;
                 }
+                if let Ok(index) = usize::try_from(idx(0)) { self.sync_script_collider(index); }
                 Value::Nil
             }
             "getthingrot" => match self.thing(idx(0)) {
@@ -13949,6 +14017,7 @@ impl Runtime {
                     t.yaw = r[1];
                     t.roll = r[2];
                 }
+                if let Ok(index) = usize::try_from(idx(0)) { self.sync_script_collider(index); }
                 Value::Nil
             }
             // `SetThingLook(thing, dir, blend)` — `sithPhysics_SetThingLook` (`0x4f5a80`): aim the
@@ -13981,6 +14050,7 @@ impl Runtime {
                     t.yaw = (-mixed[0]).atan2(mixed[1]).to_degrees();
                     t.jk_flags |= 0x100;
                 }
+                if let Ok(index) = usize::try_from(idx(0)) { self.sync_script_collider(index); }
                 Value::Nil
             }
             // `SetThingPulse(thing, seconds)`: start the thing's own pulse timer; `0` stops it.
@@ -13998,6 +14068,7 @@ impl Runtime {
                 if let Some(t) = self.thing_mut(idx(0)) {
                     t.sector = idx(1) as i32;
                 }
+                if let Ok(index) = usize::try_from(idx(0)) { self.sync_script_collider(index); }
                 Value::Nil
             }
             "getthingflags" => Value::Num(self.thing(idx(0)).map(|t| t.flags as f64).unwrap_or(0.0)),
@@ -14009,12 +14080,14 @@ impl Runtime {
                 if let Some(t) = self.thing_mut(idx(0)) {
                     t.flags |= idx(1) as u32;
                 }
+                if let Ok(index) = usize::try_from(idx(0)) { self.sync_script_collider(index); }
                 Value::Nil
             }
             "clearthingflags" => {
                 if let Some(t) = self.thing_mut(idx(0)) {
                     t.flags &= !(idx(1) as u32);
                 }
+                if let Ok(index) = usize::try_from(idx(0)) { self.sync_script_collider(index); }
                 Value::Nil
             }
             "getthinghealth" => Value::Num(self.thing(idx(0)).map(|t| t.health as f64).unwrap_or(0.0)),
@@ -19579,6 +19652,53 @@ mod tests {
             seat_height = height;
         }
         assert!((world.borrow().things[0].health - 55.0).abs() < 0.1, "riding must not repeat landing damage");
+    }
+
+    #[test]
+    fn scripted_thing_position_changes_collision_before_next_search() {
+        use crate::collide::ThingSolid;
+
+        let solids = crate::collide::test_room();
+        let mut rt = player_runtime();
+        rt.things.push(rt.things[0].clone());
+        rt.solids = Some(std::sync::Arc::new(solids.clone()));
+        solids.set_things(vec![ThingSolid {
+            index: 1, centre: [0.0; 3], origin: [0.0; 3], radius: 0.2,
+            z_min: -0.2, z_max: 0.2, sector: 0, half: None, yaw: 0.0, angles: [0.0; 3],
+            mesh: None, thing_flags: 0, collide: 1, owner: None, kind: 7, item: false,
+        }]);
+        let visible = || solids.item_has_los(0, [-0.6, 0.0, 0.0], [0.6, 0.0, 0.0], crate::collide::Gates::default());
+        assert!(!visible());
+        rt.call("SetThingPos", &[Value::Num(1.0), Value::Vec([0.0, 2.0, 0.0])]);
+        assert!(visible(), "the moved thing still blocks its former position");
+    }
+
+    #[test]
+    fn scripted_spawn_collides_in_the_same_thing_update() {
+        use crate::collide::ThingSolid;
+
+        let solids = crate::collide::test_room();
+        let mut rt = player_runtime();
+        rt.collision_templates.insert("blocker".into(), ThingSolid {
+            index: 0, centre: [0.0; 3], origin: [0.0; 3], radius: 0.2,
+            z_min: -0.2, z_max: 0.2, sector: 0, half: None, yaw: 0.0, angles: [0.0; 3],
+            mesh: None, thing_flags: 0, collide: 1, owner: None, kind: 7, item: false,
+        });
+        let world = World::new(rt);
+        let visible = || solids.item_has_los(0, [-0.6, 0.0, 0.0], [0.6, 0.0, 0.0], crate::collide::Gates::default());
+        assert!(visible());
+        let mut ran = false;
+        Runtime::sith_thing_update(&world, Some(&solids), 0.02, |player| {
+            if player {
+                ran = true;
+                world.borrow_mut().call("CreateThingAtPos", &[
+                    Value::Str("blocker".into()), Value::Num(0.0),
+                    Value::Vec([0.0; 3]), Value::Vec([0.0; 3]),
+                ]);
+                assert!(!visible(), "spawned solid did not block the next search");
+            }
+        });
+        assert!(ran);
     }
 
     #[test]

@@ -28705,6 +28705,16 @@ fn setup(
             .iter()
             .map(|thing| (thing.pos, thing.sector.max(0) as usize, [thing.pitch, thing.yaw, thing.roll])),
     ));
+    sim.world.borrow_mut().collision_templates = shapes
+        .by_template
+        .iter()
+        .filter_map(|(name, shape)| {
+            solid_things_at(std::slice::from_ref(shape), std::iter::once(([0.0; 3], 0, [0.0; 3])))
+                .into_iter()
+                .next()
+                .map(|solid| (name.clone(), solid))
+        })
+        .collect();
     commands.insert_resource(Collision(std::sync::Arc::new(geometry)));
     commands.insert_resource(SectorView { by_sector });
     commands.insert_resource(shapes);
