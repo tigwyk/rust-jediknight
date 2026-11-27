@@ -26001,6 +26001,7 @@ fn solid_things_at(
                     sector,
                     half: Some(half),
                     yaw,
+                    angles: [pitch, yaw, roll],
                     mesh,
                     thing_flags: shape.thing_flags,
                     collide: shape.collide,
@@ -26019,6 +26020,7 @@ fn solid_things_at(
                     item: shape.item,
                     half: None,
                     yaw,
+                    angles: [pitch, yaw, roll],
                     mesh,
                     thing_flags: shape.thing_flags,
                     collide: shape.collide,
@@ -31936,6 +31938,7 @@ mod registration_tests {
         solids.set_things(vec![collide::ThingSolid {
             index: 1, centre: [0.5, 0.0, 0.1], origin: [0.5, 0.0, 0.1],
             sector: 0, radius: 0.125, z_min: 0.0, z_max: 0.2, half: None, yaw: 0.0,
+            angles: [0.0; 3],
             mesh: None, thing_flags: 0x400, collide: 1, owner: None, kind: 2, item: false,
         }]);
         let handle = runtime::Runtime::handle(&level);
@@ -32009,11 +32012,13 @@ mod registration_tests {
                 collide::ThingSolid {
                     index: 1, centre: [0.5, 0.0, 0.1875], origin: [0.5, 0.0, 0.1875],
                     sector: 0, radius: 0.125, z_min: 0.18, z_max: 0.19, half: None, yaw: 0.0,
+                    angles: [0.0; 3],
                     mesh: None, thing_flags: 0, collide: 1, owner: None, kind: 5, item: true,
                 },
                 collide::ThingSolid {
                     index: 2, centre: blocker, origin: blocker,
                     sector: 0, radius: 0.04, z_min: 0.05, z_max: 0.14, half: None, yaw: 0.0,
+                    angles: [0.0; 3],
                     mesh: None, thing_flags: 0x200, collide: 1, owner: None, kind: 7, item: false,
                 },
             ]);
@@ -32469,6 +32474,7 @@ mod walker_tests {
             sector: 0,
             half: None,
             yaw: 0.0,
+            angles: [0.0; 3],
             mesh: Some(vec![vec![collide::Face {
                 normal: [0.0, 0.0, 1.0],
                 point: [0.5, 0.0, RISER],

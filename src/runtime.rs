@@ -82,7 +82,12 @@ impl ContactRuntime<'_> {
                 let index = world.borrow().local_player();
                 Runtime::move_phase(world, index, state, *eye, dispatch);
             }
-            Self::Mover { world, index, dispatch } => Runtime::move_phase(world, Some(*index), state, 0.0, dispatch),
+            Self::Mover { world, index, dispatch } => {
+                let rt = world.borrow();
+                let eye = if rt.local_player() == Some(*index) { rt.player_eye } else { 0.0 };
+                drop(rt);
+                Runtime::move_phase(world, Some(*index), state, eye, dispatch);
+            }
             Self::Tick(_) => {}
         }
     }
@@ -91,15 +96,40 @@ impl ContactRuntime<'_> {
         let mut at = state.pos;
         match self {
             Self::Player { eye, .. } => at[2] += *eye,
+            Self::Mover { world, .. } => {
+                let rt = world.borrow();
+                if rt.local_player().is_some_and(|player| Some(player) == index) { at[2] += rt.player_eye; }
+            }
             Self::Tick(rt) if rt.local_player().is_some_and(|player| Some(player) == index) => at[2] += rt.player_eye,
             _ => {}
         }
         at
     }
 
+    fn sync_pose(&mut self, solids: &crate::collide::Solids, index: usize) {
+        self.with(|rt| {
+            let thing = &rt.things[index];
+            if let Ok(sector) = usize::try_from(thing.sector) {
+                solids.sync_thing_pose(index, thing.pos, sector, [thing.pitch, thing.yaw, thing.roll]);
+            }
+        });
+    }
+
+    fn sync_state(&mut self, solids: &crate::collide::Solids, index: usize, state: &crate::collide::MoveState) {
+        let pos = self.position(Some(index), state);
+        self.with(|rt| {
+            let thing = &rt.things[index];
+            solids.sync_thing_pose(index, pos, state.sector, [thing.pitch, thing.yaw, thing.roll]);
+        });
+    }
+
     fn publish(&mut self, index: usize, state: &crate::collide::MoveState) {
         let eye = match self {
             Self::Player { eye, .. } => *eye,
+            Self::Mover { world, .. } => {
+                let rt = world.borrow();
+                if rt.local_player() == Some(index) { rt.player_eye } else { 0.0 }
+            }
             Self::Tick(rt) if rt.local_player() == Some(index) => rt.player_eye,
             _ => 0.0,
         };
@@ -119,6 +149,10 @@ impl ContactRuntime<'_> {
     fn read_back(&mut self, index: usize, state: &mut crate::collide::MoveState) {
         let eye = match self {
             Self::Player { eye, .. } => *eye,
+            Self::Mover { world, .. } => {
+                let rt = world.borrow();
+                if rt.local_player() == Some(index) { rt.player_eye } else { 0.0 }
+            }
             Self::Tick(rt) if rt.local_player() == Some(index) => rt.player_eye,
             _ => 0.0,
         };
@@ -3611,6 +3645,9 @@ impl Runtime {
             if self.sith_thing_update_one(&mut pass, geometry, index) {
                 Self::thing_motion_with(&mut ContactRuntime::Tick(self), &mut pass, geometry, index);
                 self.sith_puppet_thing_key(&mut pass, index);
+                if let Some(solids) = geometry.or(pass.stored.as_deref()) {
+                    ContactRuntime::Tick(self).sync_pose(solids, index);
+                }
             }
         }
         self.thing_update_end(pass)
@@ -3706,6 +3743,10 @@ impl Runtime {
                 world.borrow_mut().sith_puppet_thing_key(&mut pass, index);
                 if Some(index) == pass.player_at {
                     callback(true);
+                }
+                if let Some(solids) = geometry.or(pass.stored.as_deref()) {
+                    let mut dispatch = || callback(false);
+                    ContactRuntime::Mover { world, index, dispatch: &mut dispatch }.sync_pose(solids, index);
                 }
             }
         }
@@ -4172,6 +4213,7 @@ impl Runtime {
                 [thing.pitch, thing.yaw, thing.roll] = old;
             });
         }
+        if let Some(solids) = solids { contact.sync_pose(solids, parent); }
         let transform = |v: [f32; 3]| {
             let v = Vec3::from(v);
             let local = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
@@ -4195,6 +4237,7 @@ impl Runtime {
                     let t = &mut rt.things[index];
                     [t.pitch, t.yaw, t.roll] = child_new;
                 });
+                if let Some(solids) = solids { contact.sync_pose(solids, index); }
                 if !pass.turned.contains(&index) { pass.turned.push(index); }
                 Self::rotate_riders(contact, pass, solids, index, child_old, child_new, false);
             }
@@ -4259,6 +4302,7 @@ impl Runtime {
                 [thing.pitch, thing.yaw, thing.roll] = new;
             });
         }
+        if let Some(solids) = solids { contact.sync_pose(solids, parent); }
     }
 
     fn sweep_path(contact: &mut ContactRuntime<'_>, solids: Option<&crate::collide::Solids>, index: usize, radius: f32, delta: [f32; 3]) -> f32 {
@@ -8257,7 +8301,7 @@ impl Runtime {
                 let mut contact = ContactRuntime::Player { world, eye: body.eye, dispatch: &mut *dispatch };
                 let reduced = Self::move_riders(&mut contact, solids, index, &mut state, delta);
                 if reduced == [0.0; 3] && delta != [0.0; 3] {
-                    Self::place_rigid_riders(&mut contact, index, &mut state);
+                    Self::place_rigid_riders(&mut contact, solids, index, &mut state);
                 }
                 reduced
             } else { delta };
@@ -8266,6 +8310,8 @@ impl Runtime {
                 |state, dir, distance, radius, flags, search| {
                     let rt = world.borrow();
                     if let Some(index) = rt.local_player() {
+                        solids.sync_thing_pose(index, [state.pos[0], state.pos[1], state.pos[2] + body.eye], state.sector,
+                            [rt.things[index].pitch, rt.things[index].yaw, rt.things[index].roll]);
                         search.exclude_thing(index);
                         if (flags & 0x40 != 0 || state.attach_flags & 8 != 0)
                             && let Some(parent) = rt.things[index].attachment_parent
@@ -8293,7 +8339,7 @@ impl Runtime {
                     if let Some(index) = player {
                         let mut dispatch = dispatch.borrow_mut();
                         let mut contact = ContactRuntime::Player { world, eye: body.eye, dispatch: &mut *dispatch };
-                        Self::place_rigid_riders(&mut contact, index, state);
+                        Self::place_rigid_riders(&mut contact, solids, index, state);
                     }
                 },
                 |_| { find_floor = true; },
@@ -8408,6 +8454,10 @@ impl Runtime {
             }
             rt.publish_player(body);
             body.published_pose = rt.local_player().map(|i| (rt.things[i].pos, body.sector));
+            if let Some(index) = rt.local_player() {
+                let thing = &rt.things[index];
+                solids.sync_thing_pose(index, thing.pos, body.sector, [thing.pitch, thing.yaw, thing.roll]);
+            }
         }
         crossed
     }
@@ -8507,6 +8557,7 @@ impl Runtime {
         if distance == 0.0 { return delta; }
         let direction = Vec3::from(delta) / distance;
         contact.publish(parent, parent_state);
+        contact.sync_state(solids, parent, parent_state);
         let mut child = contact.with(|rt| rt.things[parent].first_child);
         while let Some(index) = child {
             let flags = contact.with(|rt| rt.things[index].attach_flags);
@@ -8560,6 +8611,8 @@ impl Runtime {
                         thing.attach_flags = state.attach_flags;
                         if state.pos != start && !rt.respawned.contains(&index) { rt.respawned.push(index); }
                     });
+                    contact.sync_pose(solids, index);
+                    contact.sync_state(solids, parent, parent_state);
                     if traveled < distance {
                         let blocks = contact.with(|rt| rt.things[index].attach_flags) & 2 == 0 || state.attach.and_then(|a| a.thing)
                             .and_then(|hit| solids.thing_face_attach(hit))
@@ -8579,6 +8632,8 @@ impl Runtime {
                                     ContactRuntime::Tick(_) => {}
                                 }
                                 contact.read_back(parent, parent_state);
+                                contact.sync_state(solids, parent, parent_state);
+                                contact.sync_pose(solids, index);
                             }
                             distance = traveled;
                         }
@@ -8590,13 +8645,18 @@ impl Runtime {
         (direction * distance).to_array()
     }
 
-    fn place_rigid_riders(contact: &mut ContactRuntime<'_>, parent: usize, state: &mut crate::collide::MoveState) {
+    fn place_rigid_riders(contact: &mut ContactRuntime<'_>, solids: &crate::collide::Solids, parent: usize, state: &mut crate::collide::MoveState) {
         let player_eye = match contact {
             ContactRuntime::Player { eye, .. } => *eye,
+            ContactRuntime::Mover { world, .. } => {
+                let rt = world.borrow();
+                if rt.local_player() == Some(parent) { rt.player_eye } else { 0.0 }
+            }
             ContactRuntime::Tick(rt) if rt.local_player() == Some(parent) => rt.player_eye,
             _ => 0.0,
         };
         contact.publish(parent, state);
+        contact.sync_state(solids, parent, state);
         let mut child = contact.with(|rt| rt.things[parent].first_child);
         while let Some(index) = child {
             let prepared = contact.with(|rt| {
@@ -8629,6 +8689,10 @@ impl Runtime {
                     if !rt.respawned.contains(&index) { rt.respawned.push(index); }
                 }
             });
+            contact.with(|rt| {
+                let thing = &rt.things[index];
+                solids.sync_thing_pose(index, next, child_state.sector, [thing.pitch, thing.yaw, thing.roll]);
+            });
             if child_state.sector != state.sector {
                 match contact {
                     ContactRuntime::Player { world, dispatch, .. } | ContactRuntime::Mover { world, dispatch, .. } => {
@@ -8654,6 +8718,8 @@ impl Runtime {
                     thing.attach_flags = child_state.attach_flags;
                 });
             }
+            contact.sync_pose(solids, index);
+            contact.sync_state(solids, parent, state);
             child = contact.with(|rt| rt.things[index].next_sibling);
         }
     }
@@ -8665,14 +8731,15 @@ impl Runtime {
         let requested = delta;
         let delta = Self::move_riders(contact, solids, index, state, delta);
         if delta == [0.0; 3] && requested != [0.0; 3] {
-            Self::place_rigid_riders(contact, index, state);
+            Self::place_rigid_riders(contact, solids, index, state);
             return 0.0;
         }
         let rt = std::cell::RefCell::new(contact);
-        solids.move_thing_with(
+        let traveled = solids.move_thing_with(
             state, delta, radius, flags,
             |state, dir, distance, radius, flags, search| {
                 search.exclude_thing(index);
+                rt.borrow_mut().sync_state(solids, index, state);
                 rt.borrow_mut().with(|runtime| {
                     if flags & 0x40 != 0 || state.attach_flags & 8 != 0 {
                         if let Some(parent) = runtime.things[index].attachment_parent {
@@ -8686,7 +8753,7 @@ impl Runtime {
             },
             |state, surface, far| Self::thing_crossing(&mut rt.borrow_mut(), Some(index), state, surface, far),
             |state| rt.borrow_mut().with(|runtime| solids.inside_sector_with_gates(state.sector, state.pos, 0.0, runtime.gates())),
-            |state| Self::place_rigid_riders(&mut rt.borrow_mut(), index, state),
+            |state| Self::place_rigid_riders(&mut rt.borrow_mut(), solids, index, state),
             |state| {
                 let mut contact = rt.borrow_mut();
                 Self::update_floor_attach(&mut contact, solids, index, state, radius, height);
@@ -8701,7 +8768,9 @@ impl Runtime {
                 if state.kind == 3 { return solids.probe_contact(state, hit, crease); }
                 Self::solid_contact(solids, &mut rt.borrow_mut(), Some(index), state, hit, crease)
             },
-        )
+        );
+        rt.borrow_mut().sync_state(solids, index, state);
+        traveled
     }
 
     /// `sithCollision_MoveThing`'s closing `sithPhysics_FindFloor(thing, 0)` (`0x4e7950:279-294`)
@@ -15065,7 +15134,7 @@ mod tests {
         let solids = crate::collide::test_room();
         solids.set_things(vec![crate::collide::ThingSolid {
             index: 1, centre: [0.4, 0.0, 0.0], origin: [0.4, 0.0, 0.0], radius: 0.1,
-            z_min: -0.1, z_max: 0.1, sector: 0, half: None, yaw: 0.0, mesh: None,
+            z_min: -0.1, z_max: 0.1, sector: 0, half: None, yaw: 0.0, angles: [0.0; 3], mesh: None,
             thing_flags: 0, collide: 1, owner: None, kind: 10, item: false,
         }]);
         let mut rt = door_runtime();
@@ -15788,6 +15857,7 @@ mod tests {
             sector: 0,
             half: None,
             yaw: 0.0,
+            angles: [0.0; 3],
             mesh: Some(vec![vec![crate::collide::Face {
                 normal: [0.0, 0.0, 1.0],
                 point: [0.0, 0.0, 1.0123],
@@ -19466,7 +19536,7 @@ mod tests {
         rt.template_height.insert("walkplayer".into(), 0.125);
         let pose = |z| solids.set_things(vec![ThingSolid {
             index: parent, centre: [0.0, 0.0, z], origin: [0.0, 0.0, z], radius: 0.75,
-            z_min: z - 0.05, z_max: z, sector: 0, half: None, yaw: 0.0,
+            z_min: z - 0.05, z_max: z, sector: 0, half: None, yaw: 0.0, angles: [0.0; 3],
             mesh: Some(vec![vec![Face {
                 normal: [0.0, 0.0, 1.0], point: [-0.5, -0.5, z],
                 verts: vec![[-0.5, -0.5, z], [0.5, -0.5, z], [0.5, 0.5, z], [-0.5, 0.5, z]],
@@ -19502,7 +19572,6 @@ mod tests {
                 let rt = world.borrow();
                 assert!((rt.things[parent].pos[2] - z).abs() < 1e-6);
             }
-            pose(z);
             for _ in 0..5 { tick(&mut body); }
             assert_eq!(body.attach.and_then(|a| a.thing), Some(target));
             let height = body.pos.z - z;
@@ -19510,6 +19579,98 @@ mod tests {
             seat_height = height;
         }
         assert!((world.borrow().things[0].health - 55.0).abs() < 0.1, "riding must not repeat landing damage");
+    }
+
+    #[test]
+    fn later_player_finds_moved_platform_during_thing_update() {
+        use crate::collide::{Face, ThingSolid};
+
+        let solids = crate::collide::test_room();
+        let mut rt = player_runtime();
+        let mut lift = rt.things[0].clone();
+        lift.pos = [0.0; 3];
+        lift.vel = [0.0; 3];
+        lift.flags = 0x40;
+        lift.frames = vec![[0.0; 6], [0.0, 0.0, 0.5, 0.0, 0.0, 0.0]];
+        lift.move_to_frame(1, 3.0);
+        rt.things.insert(0, lift);
+        rt.templates.insert(0, "testplatform".into());
+        rt.types.insert(0, 7);
+        rt.template_move.insert("testplatform".into(), "path".into());
+        rt.template_height.insert("walkplayer".into(), 0.125);
+        solids.set_things(vec![ThingSolid {
+            index: 0, centre: [0.0; 3], origin: [0.0; 3], radius: 0.75,
+            z_min: -0.05, z_max: 0.0, sector: 0, half: None, yaw: 0.0, angles: [0.0; 3],
+            mesh: Some(vec![vec![Face {
+                normal: [0.0, 0.0, 1.0], point: [-0.5, -0.5, 0.0],
+                verts: vec![[-0.5, -0.5, 0.0], [0.5, -0.5, 0.0], [0.5, 0.5, 0.0], [-0.5, 0.5, 0.0]],
+                surface: usize::MAX,
+            }]].into()),
+            thing_flags: 0x40, collide: 3, owner: None, kind: 7, item: false,
+        }]);
+        let rules = crate::Rules::from_level(&Level::default());
+        let mut body = walk_body(Vec3::new(0.0, 0.0, 0.3 + rules.radius + 0.005));
+        body.grounded = false;
+        body.gravity = 0.0;
+        body.vy = -0.5;
+        let world = World::new(rt);
+        Runtime::sith_thing_update(&world, Some(&solids), 0.1, |player| {
+            if player {
+                Runtime::step_player(&world, &mut body, &solids, PlayerInput::default(), &rules, 0.02, || {});
+            }
+        });
+        assert!((world.borrow().things[0].pos[2] - 0.3).abs() < 1e-6);
+        assert_eq!(body.attach.and_then(|a| a.thing).map(|hit| hit.thing), Some(0));
+    }
+
+    #[test]
+    fn later_player_finds_rotated_platform_during_thing_update() {
+        use crate::collide::{Face, ThingSolid};
+
+        let solids = crate::collide::test_room();
+        let mut rt = player_runtime();
+        let mut platform = rt.things[0].clone();
+        platform.pos = [0.0; 3];
+        platform.vel = [0.0; 3];
+        platform.flags = 0x40;
+        platform.frames = vec![[0.0; 6], [0.0, 0.0, 0.0, 0.0, 90.0, 0.0]];
+        platform.move_to_frame(1, 1.0);
+        rt.things.insert(0, platform);
+        rt.templates.insert(0, "testplatform".into());
+        rt.types.insert(0, 7);
+        rt.template_move.insert("testplatform".into(), "path".into());
+        rt.template_height.insert("walkplayer".into(), 0.125);
+        solids.set_things(vec![ThingSolid {
+            index: 0, centre: [0.0; 3], origin: [0.0; 3], radius: 0.75,
+            z_min: -0.05, z_max: 0.0, sector: 0, half: None, yaw: 0.0, angles: [0.0; 3],
+            mesh: Some(vec![vec![Face {
+                normal: [0.0, 0.0, 1.0], point: [-0.5, -0.1, 0.0],
+                verts: vec![[-0.5, -0.1, 0.0], [0.5, -0.1, 0.0], [0.5, 0.1, 0.0], [-0.5, 0.1, 0.0]],
+                surface: usize::MAX,
+            }]].into()),
+            thing_flags: 0x40, collide: 3, owner: None, kind: 7, item: false,
+        }]);
+        let rules = crate::Rules::from_level(&Level::default());
+        let mut body = walk_body(Vec3::new(0.0, 0.4, rules.radius + 0.005));
+        body.grounded = false;
+        body.gravity = 0.0;
+        body.vy = -0.5;
+        let world = World::new(rt);
+        let mut player_stepped = false;
+        Runtime::sith_thing_update(&world, Some(&solids), 1.0, |player| {
+            if player {
+                player_stepped = true;
+                Runtime::step_player(&world, &mut body, &solids, PlayerInput::default(), &rules, 0.02, || {});
+                let floor = body.attach.expect("rotated platform floor");
+                assert_eq!(floor.thing.map(|hit| hit.thing), Some(0));
+                // rdMatrix_Build34's 90-degree yaw maps the first vertex to (0.1, -0.5, 0).
+                assert!((floor.point[0] - 0.1).abs() < 1e-5);
+                assert!((floor.point[1] + 0.5).abs() < 1e-5);
+                assert!(floor.point[2].abs() < 1e-5);
+            }
+        });
+        assert!(player_stepped);
+        assert!((world.borrow().things[0].yaw - 90.0).abs() < 1e-5);
     }
 
     #[test]
@@ -19696,7 +19857,7 @@ mod tests {
         rt.mass.insert(1, 150.0);
         solids.set_things(vec![crate::collide::ThingSolid {
             index: 1, centre: [x, 0.0, 0.0], origin: [x, 0.0, 0.0], radius: 0.1,
-            z_min: -0.1, z_max: 0.1, sector: 0, half: None, yaw: 0.0, mesh: None,
+            z_min: -0.1, z_max: 0.1, sector: 0, half: None, yaw: 0.0, angles: [0.0; 3], mesh: None,
             thing_flags: 0x80, collide: 1, kind: 2, owner: None, item: false,
         }]);
         let rt = World::new(rt);
@@ -19735,7 +19896,7 @@ mod tests {
             rt.gravity = 0.0;
             solids.set_things(rt.things.iter().enumerate().map(|(index, t)| crate::collide::ThingSolid {
                 index, centre: t.pos, origin: t.pos, radius: 0.1, z_min: -0.1, z_max: 0.1, sector: 0,
-                half: None, yaw: 0.0, mesh: None, thing_flags: 0, collide: 1, kind: 4, owner: None, item: false,
+                half: None, yaw: t.yaw, angles: [t.pitch, t.yaw, t.roll], mesh: None, thing_flags: 0, collide: 1, kind: 4, owner: None, item: false,
             }).collect());
 
             rt.step(Some(&solids), 0.02);
@@ -21041,7 +21202,7 @@ mod tests {
         rt.things[0].pos = [-0.4, 0.0, -0.93];
         solids.set_things(vec![crate::collide::ThingSolid {
             index: 0, centre: [-0.4, 0.0, -0.93], origin: [-0.4, 0.0, -0.93], radius: 0.065,
-            z_min: -1.0, z_max: -0.8, sector: 0, half: None, yaw: 0.0, mesh: None,
+            z_min: -1.0, z_max: -0.8, sector: 0, half: None, yaw: 0.0, angles: [0.0; 3], mesh: None,
             thing_flags: 0, collide: 1, kind: 10, owner: None, item: false,
         }]);
         rt.call("AISetMovePos", &[Value::Num(1.0), Value::Vec([1.5, 0.0, -0.93])]);

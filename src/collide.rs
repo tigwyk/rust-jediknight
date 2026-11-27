@@ -59,6 +59,8 @@ pub struct ThingSolid {
     pub half: Option<[f32; 2]>,
     /// Degrees, the engine's `rdMatrix_Build34` yaw.
     pub yaw: f32,
+    /// Full orientation of the world-space collision mesh, in degrees.
+    pub angles: [f32; 3],
     /// `collide=3`: the model's collision faces in world space (outward normals), placed under the
     /// thing's full pitch/yaw/roll. `sithIntersect_CheckSphereThingIntersection` (`0x5080d0`) sweeps
     /// these instead of a sphere, so a door leaf laid flat (`18Ascend` things 323/324) is a floor.
@@ -184,6 +186,54 @@ impl LevelGeometry {
             .things
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = things;
+    }
+
+    /// Synchronize a placed thing's collision pose with its live runtime pose.
+    pub fn sync_thing_pose(&self, index: usize, pos: [f32; 3], sector: usize, angles: [f32; 3]) {
+        let mut things = self.things.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(thing) = things.iter_mut().find(|thing| thing.index == index) else { return };
+        thing.sector = sector;
+        if thing.origin == pos && thing.angles == angles { return; }
+        let old_pos = thing.origin;
+        let old_angles = thing.angles;
+        let rotation = (old_angles != angles).then(|| {
+            let axes = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+            (
+                axes.map(|axis| crate::runtime::rotate_by_angles(axis, old_angles[0], old_angles[1], old_angles[2])),
+                axes.map(|axis| crate::runtime::rotate_by_angles(axis, angles[0], angles[1], angles[2])),
+            )
+        });
+        let rotate = |v: [f32; 3]| {
+            let Some((old, new)) = rotation else { return v };
+            let local = old.map(|axis| axis[0] * v[0] + axis[1] * v[1] + axis[2] * v[2]);
+            std::array::from_fn(|i| new[0][i] * local[0] + new[1][i] * local[1] + new[2][i] * local[2])
+        };
+        let place = |v: [f32; 3]| {
+            let v = rotate([v[0] - old_pos[0], v[1] - old_pos[1], v[2] - old_pos[2]]);
+            [v[0] + pos[0], v[1] + pos[1], v[2] + pos[2]]
+        };
+        if let Some(mesh) = &mut thing.mesh {
+            let mut bounds = (f32::MAX, f32::MIN);
+            for face in std::sync::Arc::make_mut(mesh).iter_mut().flatten() {
+                face.normal = rotate(face.normal);
+                face.point = place(face.point);
+                for vertex in &mut face.verts {
+                    *vertex = place(*vertex);
+                    bounds.0 = bounds.0.min(vertex[2]);
+                    bounds.1 = bounds.1.max(vertex[2]);
+                }
+            }
+            (thing.z_min, thing.z_max) = bounds;
+        } else {
+            thing.z_min += pos[2] - old_pos[2];
+            thing.z_max += pos[2] - old_pos[2];
+        }
+        let (sin, cos) = (angles[1] - old_angles[1]).to_radians().sin_cos();
+        let (x, y) = (thing.centre[0] - old_pos[0], thing.centre[1] - old_pos[1]);
+        thing.centre = [pos[0] + x * cos - y * sin, pos[1] + x * sin + y * cos, pos[2]];
+        thing.origin = pos;
+        thing.yaw = angles[1];
+        thing.angles = angles;
     }
 
     pub fn things(&self) -> std::sync::RwLockReadGuard<'_, Vec<ThingSolid>> {
@@ -3494,6 +3544,7 @@ mod tests {
             sector: 0,
             half: None,
             yaw: 0.0,
+            angles: [0.0; 3],
             mesh: None,
             thing_flags,
             collide: 1,
@@ -3623,6 +3674,7 @@ mod tests {
             sector: 0,
             half: None,
             yaw: 0.0,
+            angles: [0.0; 3],
             mesh: None,
             thing_flags: 0,
             collide: 1,
@@ -3645,6 +3697,7 @@ mod tests {
             sector: 0,
             half: None,
             yaw: 0.0,
+            angles: [0.0; 3],
             mesh: None,
             thing_flags: 0,
             collide: 1,
@@ -3750,6 +3803,7 @@ mod tests {
             sector: 0,
             half: Some([0.1, 0.1]),
             yaw: 0.0,
+            angles: [0.0; 3],
             mesh: None,
             thing_flags: 0,
             collide: 1,
@@ -4616,6 +4670,7 @@ mod tests {
             sector: 2,
             half: None,
             yaw: 0.0,
+            angles: [0.0; 3],
             mesh: None,
             thing_flags: 0,
             collide: 1,
@@ -4654,6 +4709,7 @@ mod tests {
             sector: 0,
             half: None,
             yaw: 0.0,
+            angles: [0.0; 3],
             mesh: None,
             thing_flags: 0,
             collide: 1,
@@ -4707,6 +4763,7 @@ mod tests {
             sector: 0,
             half: Some([0.2, 0.0125]),
             yaw: 0.0,
+            angles: [0.0; 3],
             mesh: Some(vec![faces].into()),
             thing_flags: 0,
             collide: 3,
@@ -4849,6 +4906,7 @@ mod tests {
             sector: 0,
             half: None,
             yaw: 0.0,
+            angles: [0.0; 3],
             mesh: None,
             thing_flags: 0,
             collide: 1,
@@ -4921,6 +4979,7 @@ mod tests {
             sector: 0,
             half: Some([1.0; 2]),
             yaw: 0.0,
+            angles: [0.0; 3],
             mesh: Some(vec![vec![Face {
                 normal: [-1.0, 0.0, 0.0],
                 point: [0.0; 3],
@@ -4990,6 +5049,7 @@ mod tests {
         ThingSolid {
             index: 77, centre: [0.0; 3], origin: [0.0; 3], radius: 4.0,
             z_min: -4.0, z_max: 4.0, sector: 0, half: None, yaw: 0.0,
+            angles: [0.0; 3],
             mesh: Some(meshes.into()), thing_flags: 0x40, collide: 3, owner: None, kind: 7, item: false,
         }
     }
@@ -5244,6 +5304,7 @@ mod tests {
         solids.set_things(vec![ThingSolid {
             index: 77, centre: [0.0; 3], origin: [0.0; 3], radius: 4.0,
             z_min: -4.0, z_max: 4.0, sector: 0, half: None, yaw: 0.0,
+            angles: [0.0; 3],
             mesh: Some(vec![vec![Face {
                 normal: [0.0, 0.0, 1.0],
                 point: [0.0, 0.0, -0.1],
